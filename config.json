@@ -1,0 +1,68 @@
+{
+  "app": {
+    "host": "0.0.0.0",
+    "port": 4000,
+    "debug": false,
+    "max_content_length": 52428800
+  },
+  "processing": {
+    "cost_per_acre": 500,
+    "target_resolution_mpp": 0.075,
+    "default_model": "model_55",
+    "max_area_acres": 1000,
+    "imagery_months": [8, 9, 10],
+    "imagery_years_back": 3,
+    "max_concurrent_jobs": 3,
+    "job_timeout_minutes": 30
+  },
+  "models": {
+    "model_55": {
+      "filename": "model_epoch_55.ckpt",
+      "display_name": "Model 55 (Default)",
+      "description": "Best performing model from validation"
+    },
+    "model_50": {
+      "filename": "model_epoch_50.ckpt", 
+      "display_name": "Model 50",
+      "description": "Alternative model checkpoint"
+    },
+    "model_60": {
+      "filename": "model_epoch_60.ckpt",
+      "display_name": "Model 60", 
+      "description": "Higher epoch model"
+    }
+  },
+  "default_settings": {
+    "confidence_threshold": 0.25,
+    "iou_threshold": 0.7,
+    "containment_threshold": 0.75,
+    "patch_size": 1000,
+    "patch_overlap": 0.35,
+    "enable_postprocessing": true
+  },
+  "paths": {
+    "checkpoints_dir": "../checkpoints",
+    "checkpoints_alt_dir": "./checkpoints",
+    "temp_dir": "temp_files",
+    "output_dir": "outputs",
+    "logs_dir": "logs"
+  },
+  "ui": {
+    "map_center": [39.8283, -98.5795],
+    "map_zoom": 4,
+    "default_tile_layer": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+  },
+  "security": {
+    "rate_limit_per_minute": 10,
+    "max_file_size_mb": 50,
+    "allowed_extensions": ["kml", "kmz"]
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "log_to_file": true,
+    "log_file": "logs/arbornote.log",
+    "max_log_size_mb": 100,
+    "backup_count": 5
+  }
+}

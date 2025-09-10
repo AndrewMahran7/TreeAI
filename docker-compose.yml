@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  arbornote:
+    build: .
+    ports:
+      - "4000:4000"
+    environment:
+      - FLASK_ENV=production
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY}
+      - NEARMAP_API_KEY=${NEARMAP_API_KEY}
+      - MAX_CONCURRENT_JOBS=3
+      - JOB_TIMEOUT_MINUTES=30
+    volumes:
+      # Model checkpoints (mount your model directory)
+      - ./checkpoints:/app/checkpoints:ro
+      # Persistent storage for logs
+      - arbornote_logs:/app/logs
+      # Persistent storage for outputs
+      - arbornote_outputs:/app/outputs
+      # Temporary files (can be cleaned up)
+      - arbornote_temp:/app/temp_files
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Nginx reverse proxy for production
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro  # Mount SSL certificates
+    depends_on:
+      - arbornote
+    restart: unless-stopped
+    profiles:
+      - with-proxy
+
+  # Optional: Redis for caching (future enhancement)
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - arbornote_redis:/data
+    restart: unless-stopped
+    profiles:
+      - with-cache
+
+volumes:
+  arbornote_logs:
+  arbornote_outputs:
+  arbornote_temp:
+  arbornote_redis:
+
+networks:
+  default:
+    name: arbornote_network

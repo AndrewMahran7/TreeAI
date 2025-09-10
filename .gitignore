@@ -1,0 +1,28 @@
+# --------------------------
+# Environment & Config Files
+# --------------------------
+.env
+*.env
+.env.template
+
+# --------------------------
+# Virtual Environments
+# --------------------------
+/arbornote_env/
+/venv/
+/.venv/
+
+# --------------------------
+# Training Checkpoints & Logs
+# --------------------------
+/checkpoints/
+/lightning_logs/
+/logs/
+/temp_files/
+
+# --------------------------
+# OS & Editor Junk
+# --------------------------
+.DS_Store
+Thumbs.db
+*.swp

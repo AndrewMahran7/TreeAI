@@ -1,0 +1,38 @@
+# ==============================================
+# MINIMAL REQUIREMENTS FOR ARBORNOTE
+# ==============================================
+# This file contains only essential packages for basic functionality
+
+# Core Flask dependencies
+Flask==3.0.0
+python-dotenv==1.0.0
+Werkzeug==3.0.0
+
+# Production server
+gunicorn==21.2.0
+
+# Basic data processing
+pandas==2.1.1
+numpy==1.25.2
+
+# Image processing
+Pillow==10.0.1
+
+# HTTP requests
+requests==2.31.0
+
+# Real-time communication (optional)
+Flask-SocketIO==5.3.6
+
+# Basic geospatial processing
+Shapely==2.0.1
+
+# Security
+Flask-WTF==1.2.1
+
+# System monitoring
+psutil==5.9.6
+
+# Utilities
+click>=8.1.0
+python-dateutil>=2.8.2

@@ -1,0 +1,76 @@
+# ==============================================
+# ARBORNOTE PRODUCTION REQUIREMENTS
+# ==============================================
+
+# Core Flask dependencies
+Flask>=3.0.0
+python-dotenv>=1.0.0
+Werkzeug>=3.0.0
+
+# Production WSGI server
+gunicorn>=21.0.0
+gevent>=23.0.0
+
+# Basic data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Image processing (essential)
+Pillow>=10.0.0
+
+# HTTP requests for API calls
+requests>=2.31.0
+
+# Real-time communication
+Flask-SocketIO>=5.3.0
+
+# Geospatial processing (optional - will fallback if not available)
+Shapely>=2.0.0
+pyproj>=3.6.0
+
+# AI/ML dependencies for tree detection (optional)
+# Note: These are large packages - install manually if needed
+# deepforest>=1.3.0
+# torch>=1.13.0
+# torchvision>=0.14.0
+# opencv-python>=4.8.0
+
+# KML/XML processing (optional)
+# pykml>=0.1.3
+lxml>=4.9.0
+
+# Security and validation
+Flask-WTF>=1.2.0
+email-validator>=2.0.0
+
+# Monitoring and logging
+psutil>=5.9.0
+
+# Caching (optional)
+Flask-Caching>=2.0.0
+
+# Configuration management
+click>=8.1.0
+
+# Date/time handling
+python-dateutil>=2.8.0
+Flask-Caching==2.1.0
+
+# Configuration management
+click>=8.1.0
+
+# Date/time handling
+python-dateutil>=2.8.0
+
+# File handling (usually included with Python)
+# pathlib2>=2.3.7
+
+# Error tracking (optional)
+# sentry-sdk[flask]>=1.38.0
+
+# Database support (for future use)
+# SQLAlchemy>=2.0.0
+# Flask-SQLAlchemy>=3.0.0
+
+# Rate limiting (for future use)
+# Flask-Limiter>=3.5.0
