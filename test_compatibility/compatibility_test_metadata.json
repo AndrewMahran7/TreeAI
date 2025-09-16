@@ -1,0 +1,42 @@
+{
+    "file": "compatibility_test_nearmap.jpg",
+    "resolution_mpp": 0.075,
+    "resolution_m_per_pixel": 0.075,
+    "spatial_reference": "EPSG:3857",
+    "width_px": 3662,
+    "height_px": 3619,
+    "bounds": {
+        "min_lon": -117.8343062980421,
+        "min_lat": 33.67577968763953,
+        "max_lon": -117.8313357965587,
+        "max_lat": 33.67822269231471
+    },
+    "extraction_info": {
+        "extracted_date": "2025-09-16 11:15:11",
+        "survey_capture_date": "2024-08-26",
+        "survey_id": "0d7a7186-828f-11ef-ade4-c3cf506f731f",
+        "nearmap_api_version": "v3_transactional",
+        "native_resolution": 0.062,
+        "target_resolution": 0.075,
+        "scale_factor_applied": 0.8266666666666667,
+        "resampled": true,
+        "tile_grid": {
+            "width_tiles": 2,
+            "height_tiles": 2,
+            "total_tiles": 4,
+            "downloaded_tiles": 4,
+            "tile_size": "4096x4096"
+        },
+        "seasonal_selection": {
+            "prioritize_fall": true,
+            "preferred_months": [
+                8,
+                9,
+                10
+            ],
+            "preferred_year": 2024,
+            "selected_season": "Summer",
+            "total_surveys_available": 1
+        }
+    }
+}

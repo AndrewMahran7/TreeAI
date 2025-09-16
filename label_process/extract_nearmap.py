@@ -343,16 +343,47 @@ class NearmapImageExtractor:
         cropped_image, final_size = self._crop_black_borders(combined_image)
         combined_image.close()
         
+        # CRITICAL FIX: Resample to target resolution like the working script
+        print(f"🎯 Resampling to target resolution: {self.target_mpp} m/px")
+        
+        # Calculate native resolution from survey data
+        native_resolution = self._calculate_native_resolution(survey_data, final_size)
+        scale_factor = native_resolution / self.target_mpp
+        
+        print(f"   📊 Native resolution: {native_resolution:.6f} m/px")
+        print(f"   🎯 Target resolution: {self.target_mpp:.6f} m/px") 
+        print(f"   📐 Scale factor: {scale_factor:.4f}")
+        
+        # Resample image to exact target resolution
+        if abs(scale_factor - 1.0) > 0.05:  # Only resample if significant difference
+            print(f"   🔄 Resampling required (difference > 5%)")
+            final_width = int(final_size[0] * scale_factor)
+            final_height = int(final_size[1] * scale_factor)
+            
+            resampled_image = cropped_image.resize((final_width, final_height), Image.LANCZOS)
+            cropped_image.close()
+            
+            final_size = (final_width, final_height)
+            final_image = resampled_image
+            actual_resolution = self.target_mpp
+            
+            print(f"   ✅ Resampled to: {final_width}x{final_height} pixels")
+        else:
+            print(f"   ✅ Resolution close to target, no resampling needed")
+            final_image = cropped_image
+            actual_resolution = native_resolution
+        
         # Save final image
         image_filename = f"{location_name}_nearmap.jpg"
         image_path = os.path.join(output_dir, image_filename)
-        cropped_image.save(image_path, 'JPEG', quality=95)
+        final_image.save(image_path, 'JPEG', quality=95)
         
         image_width, image_height = final_size
-        cropped_image.close()
+        final_image.close()
         
-        print(f"✅ Saved combined image: {image_path}")
-        print(f"📐 Final image size: {image_width}x{image_height} pixels (after cropping)")
+        print(f"✅ Saved final image: {image_path}")
+        print(f"📐 Final image size: {image_width}x{image_height} pixels")
+        print(f"📏 Final resolution: {actual_resolution:.6f} m/px")
         
         # Clean up temporary tiles
         print("🧹 Cleaning up temporary tiles...")
@@ -363,21 +394,28 @@ class NearmapImageExtractor:
                 pass
         
         # Calculate resolution based on actual survey data
-        actual_resolution = self._calculate_resolution_from_survey(survey_data, image_width, image_height)
+        # actual_resolution = self._calculate_resolution_from_survey(survey_data, image_width, image_height)
+        # ^^ This is now handled above in the resampling section
         
-        # Create metadata
+        # Create metadata compatible with app.py expectations
         print("💾 Creating metadata...")
         metadata = {
             "file": image_filename,
-            "resolution_m_per_pixel": round(actual_resolution, 6),
+            "resolution_mpp": round(actual_resolution, 6),
+            "resolution_m_per_pixel": round(actual_resolution, 6),  # Alternative key for compatibility
             "spatial_reference": "EPSG:3857",
             "width_px": image_width,
             "height_px": image_height,
+            "bounds": self._calculate_bounds_from_bbox(bbox),
             "extraction_info": {
                 "extracted_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "survey_capture_date": survey_data.get("captureDate", "Unknown"),
                 "survey_id": survey_data.get("id", "Unknown"),
                 "nearmap_api_version": "v3_transactional",
+                "native_resolution": native_resolution,
+                "target_resolution": self.target_mpp,
+                "scale_factor_applied": scale_factor,
+                "resampled": abs(scale_factor - 1.0) > 0.05,
                 "tile_grid": {
                     "width_tiles": width_tiles,
                     "height_tiles": height_tiles,
@@ -404,18 +442,21 @@ class NearmapImageExtractor:
         print(f"💾 Metadata saved: {metadata_path}")
         
         # Return results in the format expected by app.py
+        capture_date_clean = survey_data['captureDate'].split('T')[0] if 'T' in survey_data['captureDate'] else survey_data['captureDate']
+        
         return {
             'image_path': image_path,
             'metadata_path': metadata_path,
             'location': location_name,
-            'date_requested': survey_data['captureDate'].split('T')[0],
-            'date_actual': survey_data['captureDate'].split('T')[0],
+            'date_requested': capture_date_clean,
+            'date_actual': capture_date_clean,
             'resolution_m_per_pixel': actual_resolution,
             'width_px': image_width,
             'height_px': image_height,
             'tiles_downloaded': len(downloaded_tiles),
             'extraction_method': 'transactional_tiles',
-            'survey_id': survey_data.get('id', 'unknown')
+            'survey_id': survey_data.get('id', 'unknown'),
+            'success': True
         }
     
     def _combine_tiles_transactional(self, downloaded_tiles, width_tiles, height_tiles):
@@ -512,6 +553,39 @@ class NearmapImageExtractor:
         x = int((lon + 180.0) / 360.0 * n)
         y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
         return x, y
+    
+    def _calculate_native_resolution(self, survey_data, image_size):
+        """Calculate native resolution from survey data"""
+        # This is survey-specific and varies based on capture date
+        capture_date = survey_data.get('captureDate', '')
+        
+        try:
+            year = int(capture_date.split('-')[0])
+            # Newer surveys typically have higher resolution
+            if year >= 2024:
+                return 0.062  # ~6.2cm/pixel for recent surveys
+            elif year >= 2022:
+                return 0.075  # ~7.5cm/pixel for medium surveys  
+            else:
+                return 0.100  # ~10cm/pixel for older surveys
+        except:
+            return 0.075  # Default fallback
+    
+    def _calculate_bounds_from_bbox(self, bbox_string):
+        """Convert bbox string to bounds dict for metadata"""
+        try:
+            min_lon, min_lat, max_lon, max_lat = map(float, bbox_string.split(','))
+            return {
+                'min_lon': min_lon,
+                'min_lat': min_lat,
+                'max_lon': max_lon,
+                'max_lat': max_lat
+            }
+        except:
+            return {
+                'min_lon': 0, 'min_lat': 0,
+                'max_lon': 0, 'max_lat': 0
+            }
 
 
 # Legacy compatibility - create aliases for app.py

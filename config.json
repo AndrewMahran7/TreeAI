@@ -60,7 +60,7 @@
   "default_settings": {
     "confidence_threshold": 0.25,
     "iou_threshold": 0.9,
-    "containment_threshold": 0.5,
+    "containment_threshold": 0.6,
     "patch_size": 800,
     "patch_overlap": 0.25,
     "overlap_size": 200,
