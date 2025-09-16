@@ -158,9 +158,92 @@
             color: white;
         }
 
+        .btn-outline {
+            background: white;
+            color: #2e8b57;
+            border: 2px solid #2e8b57;
+        }
+
+        .btn-outline:hover {
+            background: #2e8b57;
+            color: white;
+        }
+
         .btn:disabled {
             opacity: 0.6;
             cursor: not-allowed;
+        }
+
+        .geofence-options {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .btn-group .btn {
+            flex: 1;
+        }
+
+        .divider-text {
+            text-align: center;
+            color: #666;
+            font-size: 0.9rem;
+            position: relative;
+            margin: 0.5rem 0;
+        }
+
+        .divider-text::before,
+        .divider-text::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            width: 40%;
+            height: 1px;
+            background: #e0e0e0;
+        }
+
+        .divider-text::before {
+            left: 0;
+        }
+
+        .divider-text::after {
+            right: 0;
+        }
+
+        .kml-upload-section {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .upload-status {
+            padding: 0.5rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            text-align: center;
+        }
+
+        .upload-status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .upload-status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .upload-status.loading {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
         }
 
         .area-info {
@@ -380,6 +463,32 @@
             <!-- Sidebar Controls -->
             <div class="sidebar">
                 
+                <!-- Geofence Creation -->
+                <div class="section">
+                    <h3><i class="fas fa-map-marked-alt"></i> Define Processing Area</h3>
+                    
+                    <div class="geofence-options">
+                        <div class="btn-group">
+                            <button id="btn-draw" class="btn btn-primary">
+                                <i class="fas fa-pencil-alt"></i> Draw Polygon
+                            </button>
+                            <button id="btn-clear" class="btn btn-secondary" disabled>
+                                <i class="fas fa-trash"></i> Clear
+                            </button>
+                        </div>
+                        
+                        <div class="divider-text">OR</div>
+                        
+                        <div class="kml-upload-section">
+                            <label for="kml-file-input" class="btn btn-outline">
+                                <i class="fas fa-file-upload"></i> Upload KML File
+                            </label>
+                            <input type="file" id="kml-file-input" accept=".kml,.kmz" style="display: none;">
+                            <div id="kml-upload-status" class="upload-status hidden"></div>
+                        </div>
+                    </div>
+                </div>
+                
                 <!-- Area Information -->
                 <div id="area-info" class="section hidden">
                     <h3><i class="fas fa-ruler-combined"></i> Area Details</h3>
@@ -418,7 +527,7 @@
                     <div class="form-group">
                         <label for="model-select">AI Model</label>
                         <select id="model-select" class="form-control">
-                            <option value="model_55">Model 55 (Default)</option>
+                            <option value="model_65">Model 65 (Default)</option>
                         </select>
                     </div>
 

@@ -45,20 +45,24 @@ class ProcessingConfig:
     model_path: str = ""
     confidence_threshold: float = 0.25
     iou_threshold: float = 0.9
-    patch_size: int = 1000
-    patch_overlap: float = 0.15
+    patch_size: int = 800
+    patch_overlap: float = 0.25
+    overlap_size: int = 200
     
     # Post-processing settings
     enable_postprocessing: bool = True
-    containment_threshold: float = 0.75
+    containment_threshold: float = 0.5
     enable_adaptive_filtering: bool = True
-    adaptive_k_factor: float = 2.0
+    adaptive_confidence_k: float = 2.0
+    show_removed_boxes: bool = False
+    validation_method: str = "containment"
+    iou_threshold_validation: float = 0.25
+    enable_adaptive_confidence: bool = True
     
     # Geofencing settings
     enable_geofencing: bool = True
     
     # Visualization settings
-    show_removed_boxes: bool = True
     save_intermediate_results: bool = True
     
     # Output settings
@@ -437,11 +441,11 @@ class ProductionPipeline:
             std_conf = np.std(confidences)
             
             # Calculate adaptive threshold
-            adaptive_threshold = max(0.25, mean_conf - self.config.adaptive_k_factor * std_conf)
+            adaptive_threshold = max(0.25, mean_conf - self.config.adaptive_confidence_k * std_conf)
             self.results.adaptive_threshold = adaptive_threshold
             
             self.log(f"Confidence stats: μ={mean_conf:.3f}, σ={std_conf:.3f}")
-            self.log(f"Adaptive threshold: max(0.25, {mean_conf:.3f} - {self.config.adaptive_k_factor}×{std_conf:.3f}) = {adaptive_threshold:.3f}")
+            self.log(f"Adaptive threshold: max(0.25, {mean_conf:.3f} - {self.config.adaptive_confidence_k}×{std_conf:.3f}) = {adaptive_threshold:.3f}")
             
             # Apply filtering
             filtered_predictions = []
@@ -488,57 +492,276 @@ class ProductionPipeline:
             return False
     
     def _apply_postprocessing_shapely(self) -> bool:
-        """Post-processing implementation using Shapely"""
-        predictions = self.predictions_raw.copy()
-        boxes_to_remove = set()
+        """Post-processing implementation using advanced box merging like validation model"""
+        if not self.predictions_raw:
+            self.log("No predictions to post-process")
+            return True
+            
+        # Convert predictions to format expected by merging function
+        pred_boxes = []
+        for pred in self.predictions_raw:
+            pred_boxes.append((pred['box'], pred['center'], pred['confidence'], pred))
         
-        for i, pred_i in enumerate(predictions):
-            if i in boxes_to_remove:
-                continue
-                
-            for j, pred_j in enumerate(predictions):
-                if i == j or j in boxes_to_remove:
-                    continue
-                
-                # Calculate intersection
-                intersection_area = pred_i['box'].intersection(pred_j['box']).area
-                area_i = pred_i['box'].area
-                area_j = pred_j['box'].area
-                
-                if area_i > 0 and area_j > 0:
-                    containment_i_in_j = intersection_area / area_i
-                    containment_j_in_i = intersection_area / area_j
-                    
-                    # Remove contained boxes
-                    if containment_i_in_j > self.config.containment_threshold:
-                        boxes_to_remove.add(i)
-                        break
-                    elif containment_j_in_i > self.config.containment_threshold:
-                        boxes_to_remove.add(j)
+        # Apply box merging with overlap threshold
+        overlap_threshold = self.config.containment_threshold
+        self.log(f"Merging overlapping boxes with threshold {overlap_threshold:.2f}")
         
-        # Create filtered lists
-        filtered_predictions = []
-        removed_predictions = []
+        merged_boxes, removed_boxes, expanded_boxes = self._merge_overlapping_boxes(
+            pred_boxes, overlap_threshold
+        )
         
-        for i, pred in enumerate(predictions):
-            if i in boxes_to_remove:
-                removed_predictions.append(pred)
-            else:
-                filtered_predictions.append(pred)
+        # Convert back to prediction format
+        final_predictions = []
+        for box, center, conf, original_pred in merged_boxes:
+            # Update the prediction with potentially merged box
+            updated_pred = original_pred.copy()
+            updated_pred['box'] = box
+            updated_pred['center'] = center
+            updated_pred['confidence'] = conf
+            
+            # Update pixel coordinates from merged box
+            bounds = box.bounds
+            updated_pred['xmin'] = bounds[0]
+            updated_pred['ymin'] = bounds[1]
+            updated_pred['xmax'] = bounds[2]
+            updated_pred['ymax'] = bounds[3]
+            
+            final_predictions.append(updated_pred)
         
-        self.predictions_raw = filtered_predictions
-        self.results.postprocessing_removed = removed_predictions
-        self.results.postprocessed = len(filtered_predictions)
+        # Store results
+        self.predictions_raw = final_predictions
+        self.results.postprocessing_removed = [pred[3] for pred in removed_boxes]
+        self.results.postprocessed = len(final_predictions)
         
-        self.log(f"Post-processing: removed {len(removed_predictions)} contained boxes")
+        self.log(f"Post-processing: merged {len(removed_boxes)} overlapping boxes into {len(expanded_boxes)} expanded boxes")
+        self.log(f"Final prediction count: {len(final_predictions)}")
         return True
     
+    def _merge_overlapping_boxes(self, pred_boxes, overlap_threshold=0.75):
+        """
+        Merge all boxes that overlap with a larger box by more than overlap_threshold.
+        Based on validation model's postprocess_merge_overlapping_boxes function.
+        """
+        if not pred_boxes:
+            return pred_boxes, [], []
+
+        merged_boxes = pred_boxes.copy()
+        removed_boxes = []
+        expanded_boxes = []
+        
+        i = 0
+        while i < len(merged_boxes):
+            boxA, centerA, confA, rowA = merged_boxes[i]
+            
+            # Find all boxes that overlap with boxA above threshold
+            overlapping_indices = [i]
+            for j in range(len(merged_boxes)):
+                if j == i:
+                    continue
+                    
+                boxB, centerB, confB, rowB = merged_boxes[j]
+                intersection_area = boxA.intersection(boxB).area
+                areaA = boxA.area
+                areaB = boxB.area
+                smaller_area = min(areaA, areaB)
+                overlap = intersection_area / smaller_area if smaller_area > 0 else 0
+
+                if overlap > overlap_threshold:
+                    overlapping_indices.append(j)
+            
+            # If more than one box overlaps, merge all
+            if len(overlapping_indices) > 1:
+                # Gather all boxes to merge
+                boxes_to_merge = [merged_boxes[idx][0] for idx in overlapping_indices]
+                centers_to_merge = [merged_boxes[idx][1] for idx in overlapping_indices]
+                confs_to_merge = [merged_boxes[idx][2] for idx in overlapping_indices]
+                rows_to_merge = [merged_boxes[idx][3] for idx in overlapping_indices]
+                
+                # Merge coordinates - create bounding box of all overlapping boxes
+                new_xmin = min([b.bounds[0] for b in boxes_to_merge])
+                new_ymin = min([b.bounds[1] for b in boxes_to_merge])
+                new_xmax = max([b.bounds[2] for b in boxes_to_merge])
+                new_ymax = max([b.bounds[3] for b in boxes_to_merge])
+                
+                merged_box = box(new_xmin, new_ymin, new_xmax, new_ymax)
+                merged_center = Point((new_xmin + new_xmax) / 2, (new_ymin + new_ymax) / 2)
+                
+                # Use confidence and row from largest box
+                largest_idx = max(overlapping_indices, key=lambda idx: merged_boxes[idx][0].area)
+                conf = merged_boxes[largest_idx][2]
+                row = merged_boxes[largest_idx][3]
+                
+                self.log(f"Merging boxes {overlapping_indices} into expanded box")
+                
+                # Add all originals to removed_boxes
+                for idx in sorted(overlapping_indices, reverse=True):
+                    removed_boxes.append(merged_boxes[idx])
+                    del merged_boxes[idx]
+                
+                # Insert new merged box at position i
+                merged_boxes.insert(i, (merged_box, merged_center, conf, row))
+                expanded_boxes.append((merged_box, merged_center, conf, row))
+                
+                # Restart scan at i (since indices have changed)
+                continue
+                
+            i += 1
+
+        return merged_boxes, removed_boxes, expanded_boxes
+    
     def _apply_postprocessing_simple(self) -> bool:
-        """Simple post-processing without Shapely"""
-        # For now, just pass through without modification
-        self.results.postprocessed = len(self.predictions_raw)
-        self.log("Post-processing: using simple mode (Shapely not available)")
+        """Simple post-processing without Shapely using basic rectangle overlap merging"""
+        if not self.predictions_raw:
+            self.log("No predictions to post-process")
+            return True
+        
+        self.log(f"Using simple box merging (Shapely not available)")
+        
+        # Convert predictions to simple format
+        boxes_data = []
+        for i, pred in enumerate(self.predictions_raw):
+            if 'box' in pred and hasattr(pred['box'], 'get'):
+                # Dictionary format box
+                box_data = {
+                    'xmin': pred['box']['xmin'],
+                    'ymin': pred['box']['ymin'], 
+                    'xmax': pred['box']['xmax'],
+                    'ymax': pred['box']['ymax'],
+                    'confidence': pred['confidence'],
+                    'original_pred': pred,
+                    'index': i
+                }
+            else:
+                # Assume direct coordinate access
+                box_data = {
+                    'xmin': pred.get('xmin', 0),
+                    'ymin': pred.get('ymin', 0),
+                    'xmax': pred.get('xmax', 0), 
+                    'ymax': pred.get('ymax', 0),
+                    'confidence': pred['confidence'],
+                    'original_pred': pred,
+                    'index': i
+                }
+            boxes_data.append(box_data)
+        
+        # Apply simple box merging
+        merged_boxes, removed_count = self._merge_boxes_simple(boxes_data, self.config.containment_threshold)
+        
+        # Convert back to prediction format
+        final_predictions = []
+        for box_data in merged_boxes:
+            pred = box_data['original_pred'].copy()
+            # Update with potentially merged coordinates
+            pred['xmin'] = box_data['xmin']
+            pred['ymin'] = box_data['ymin']
+            pred['xmax'] = box_data['xmax']
+            pred['ymax'] = box_data['ymax']
+            pred['confidence'] = box_data['confidence']
+            
+            # Update box format if it was dictionary
+            if 'box' in pred and hasattr(pred['box'], 'get'):
+                pred['box'] = {
+                    'xmin': box_data['xmin'],
+                    'ymin': box_data['ymin'],
+                    'xmax': box_data['xmax'],
+                    'ymax': box_data['ymax']
+                }
+            
+            final_predictions.append(pred)
+        
+        self.predictions_raw = final_predictions
+        self.results.postprocessed = len(final_predictions)
+        
+        self.log(f"Simple post-processing: merged {removed_count} overlapping boxes")
+        self.log(f"Final prediction count: {len(final_predictions)}")
         return True
+    
+    def _merge_boxes_simple(self, boxes_data, overlap_threshold):
+        """Simple box merging without Shapely dependencies"""
+        if not boxes_data:
+            return boxes_data, 0
+        
+        def calculate_overlap(box1, box2):
+            """Calculate overlap ratio between two boxes"""
+            # Calculate intersection
+            x_left = max(box1['xmin'], box2['xmin'])
+            y_top = max(box1['ymin'], box2['ymin'])
+            x_right = min(box1['xmax'], box2['xmax'])
+            y_bottom = min(box1['ymax'], box2['ymax'])
+            
+            if x_right < x_left or y_bottom < y_top:
+                return 0.0
+            
+            intersection_area = (x_right - x_left) * (y_bottom - y_top)
+            
+            # Calculate areas
+            area1 = (box1['xmax'] - box1['xmin']) * (box1['ymax'] - box1['ymin'])
+            area2 = (box2['xmax'] - box2['xmin']) * (box2['ymax'] - box2['ymin'])
+            
+            smaller_area = min(area1, area2)
+            if smaller_area <= 0:
+                return 0.0
+            
+            return intersection_area / smaller_area
+        
+        merged_boxes = boxes_data.copy()
+        removed_count = 0
+        
+        i = 0
+        while i < len(merged_boxes):
+            box_a = merged_boxes[i]
+            overlapping_indices = [i]
+            
+            # Find all overlapping boxes
+            for j in range(len(merged_boxes)):
+                if j == i:
+                    continue
+                    
+                box_b = merged_boxes[j]
+                overlap = calculate_overlap(box_a, box_b)
+                
+                if overlap > overlap_threshold:
+                    overlapping_indices.append(j)
+            
+            # Merge if multiple boxes overlap
+            if len(overlapping_indices) > 1:
+                # Find bounding box of all overlapping boxes
+                boxes_to_merge = [merged_boxes[idx] for idx in overlapping_indices]
+                
+                new_xmin = min(box['xmin'] for box in boxes_to_merge)
+                new_ymin = min(box['ymin'] for box in boxes_to_merge)
+                new_xmax = max(box['xmax'] for box in boxes_to_merge)
+                new_ymax = max(box['ymax'] for box in boxes_to_merge)
+                
+                # Use confidence from largest box
+                largest_box = max(boxes_to_merge, key=lambda b: (b['xmax'] - b['xmin']) * (b['ymax'] - b['ymin']))
+                
+                # Create merged box
+                merged_box = {
+                    'xmin': new_xmin,
+                    'ymin': new_ymin,
+                    'xmax': new_xmax,
+                    'ymax': new_ymax,
+                    'confidence': largest_box['confidence'],
+                    'original_pred': largest_box['original_pred'],
+                    'index': largest_box['index']
+                }
+                
+                # Remove all original boxes (in reverse order to maintain indices)
+                for idx in sorted(overlapping_indices, reverse=True):
+                    del merged_boxes[idx]
+                    removed_count += 1
+                
+                # Add merged box at position i
+                merged_boxes.insert(i, merged_box) 
+                removed_count -= 1  # Don't count the merged box as removed
+                
+                # Continue from current position
+                continue
+            
+            i += 1
+        
+        return merged_boxes, removed_count
     
     def create_visualization(self, image_path: str, output_path: str) -> bool:
         """Create visualization with bounding boxes"""
@@ -804,14 +1027,18 @@ def create_production_config(**kwargs) -> ProcessingConfig:
 
 # Example standalone usage
 if __name__ == "__main__":
-    # Example configuration
+    # Example configuration matching validation settings
     config = create_production_config(
         confidence_threshold=0.25,
         iou_threshold=0.9,
-        patch_size=1000,
-        patch_overlap=0.15,
+        patch_size=800,
+        patch_overlap=0.25,
+        overlap_size=200,
         enable_postprocessing=True,
-        containment_threshold=0.75
+        containment_threshold=0.5,
+        enable_adaptive_confidence=True,
+        adaptive_confidence_k=2.0,
+        show_removed_boxes=False
     )
     
     # Create pipeline

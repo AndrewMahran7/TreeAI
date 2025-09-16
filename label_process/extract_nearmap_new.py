@@ -247,7 +247,6 @@ class NearmapImageExtractor:
             if cov_response.status_code == 200:
                 coverage_data = cov_response.json()
                 surveys = coverage_data.get('surveys', [])
-                transaction_token = coverage_data.get('transactionToken', '')  # Get transaction token
                 
                 if not surveys:
                     raise ValueError("No surveys available for this area")
@@ -257,8 +256,8 @@ class NearmapImageExtractor:
                 if not selected_survey:
                     raise ValueError("No suitable survey found")
                 
-                # Step 3: Extract using transactional approach
-                return self._extract_using_tiles(bbox, selected_survey, output_dir, location_name, transaction_token)
+                # Step 3: Extract using simple tile approach (like working script)
+                return self._extract_using_tiles(bbox, selected_survey, output_dir, location_name)
                 
             else:
                 raise ValueError(f"Coverage API returned {cov_response.status_code}: {cov_response.text}")
@@ -267,64 +266,72 @@ class NearmapImageExtractor:
             print(f"❌ Error: {e}")
             raise
     
-    def _extract_using_tiles(self, bbox, survey_data, output_dir, location_name, transaction_token):
-        """Extract using the transactional tile approach that works (from final script)"""
-        print("Step 3: Extracting using proven transactional method...")
+    def _extract_using_tiles(self, bbox, survey_data, output_dir, location_name):
+        """Extract using the simple tile approach that works"""
+        print("Step 3: Extracting using proven tile method...")
         
-        survey_id = survey_data['id']
-        capture_date = survey_data['captureDate']
-        scale_info = survey_data.get('scale', {}).get('raster:Vert', {})
+        # Parse bbox coordinates
+        bbox_coords = bbox.split(',')
+        min_lon, min_lat, max_lon, max_lat = map(float, bbox_coords)
         
-        width_tiles = scale_info.get('widthInTiles', 1)
-        height_tiles = scale_info.get('heightInTiles', 1)
+        # Calculate appropriate zoom level and tile grid
+        center_lat = (min_lat + max_lat) / 2
+        zoom_level = self._calculate_zoom_for_target_mpp(center_lat)
         
-        print(f"   🆔 Survey ID: {survey_id}")
-        print(f"   📅 Capture Date: {capture_date}")
-        print(f"   🍂 Season: {self.get_season_from_date(capture_date)}")
-        print(f"   📏 Grid Size: {width_tiles}x{height_tiles} tiles")
-        print(f"   🔑 Transaction Token: {transaction_token[:50]}..." if transaction_token else "   ⚠️  No transaction token")
+        print(f"   📊 Bbox: {min_lon:.6f},{min_lat:.6f} to {max_lon:.6f},{max_lat:.6f}")
+        print(f"   🎯 Using zoom level {zoom_level} for target {self.target_mpp} m/px")
         
-        # Download tiles using transactional approach like the working script
-        print(f"🧩 Downloading {width_tiles * height_tiles} tiles using transactional method...")
-        print(f"   ℹ️ Using 4096x4096 pixel tiles for maximum detail")
+        # Calculate tile grid bounds
+        min_tile_x, min_tile_y = self._lonlat_to_tile(min_lon, min_lat, zoom_level)
+        max_tile_x, max_tile_y = self._lonlat_to_tile(max_lon, max_lat, zoom_level)
         
-        tile_url = f"https://api.nearmap.com/staticmap/v3/surveys/{survey_id}/Vert.jpg"
-        downloaded_tiles = []
+        # Make sure we have the right tile order (min < max)
+        if min_tile_x > max_tile_x:
+            min_tile_x, max_tile_x = max_tile_x, min_tile_x
+        if min_tile_y > max_tile_y:
+            min_tile_y, max_tile_y = max_tile_y, min_tile_y
+        
+        width_tiles = max_tile_x - min_tile_x + 1
+        height_tiles = max_tile_y - min_tile_y + 1
         total_tiles = width_tiles * height_tiles
         
-        for y in range(height_tiles):
-            for x in range(width_tiles):
+        print(f"   📐 Tile grid: {width_tiles}x{height_tiles} = {total_tiles} tiles")
+        print(f"   📍 Tile range: X({min_tile_x}-{max_tile_x}) Y({min_tile_y}-{max_tile_y})")
+        
+        # Reasonable check - prevent downloading too many tiles
+        if total_tiles > 100:
+            print(f"   ⚠️  {total_tiles} tiles is quite large for a {self.target_mpp} m/px extraction")
+            print(f"   💡 Consider using lower resolution for very large areas")
+        
+        # Download tiles
+        print(f"📥 Downloading {total_tiles} tiles...")
+        tiles_dir = os.path.join(output_dir, "tiles")
+        os.makedirs(tiles_dir, exist_ok=True)
+        
+        downloaded_tiles = []
+        date_str = survey_data['captureDate'].split('T')[0]
+        
+        for y in range(min_tile_y, max_tile_y + 1):
+            for x in range(min_tile_x, max_tile_x + 1):
                 try:
-                    tile_num = y * width_tiles + x + 1
-                    print(f"📥 Downloading tile {tile_num}/{total_tiles} ({x},{y})...")
+                    tile_filename = f"tile_{zoom_level}_{x}_{y}.jpg"
+                    tile_path = os.path.join(tiles_dir, tile_filename)
                     
-                    tile_params = {
-                        "x": str(x),
-                        "y": str(y),
-                        "tileSize": "4096x4096",
-                        "apikey": self.api_key
-                    }
+                    # Download tile using Nearmap API
+                    tile_url = f"https://api.nearmap.com/tiles/v3/Vert/{date_str}/{zoom_level}/{x}/{y}.jpg"
+                    tile_params = {"apikey": self.api_key}
                     
-                    # Add transaction token if available
-                    if transaction_token:
-                        tile_params["transactionToken"] = transaction_token
-                    
-                    response = requests.get(tile_url, params=tile_params, stream=True, timeout=30)
+                    response = requests.get(tile_url, params=tile_params, timeout=30)
                     
                     if response.status_code == 200:
-                        tile_filename = f"temp_tile_{x}_{y}.jpg"
-                        tile_path = os.path.join(output_dir, tile_filename)
-                        
-                        with open(tile_path, "wb") as tile_file:
-                            for chunk in response.iter_content(1024):
-                                tile_file.write(chunk)
-                        
+                        with open(tile_path, 'wb') as f:
+                            f.write(response.content)
                         downloaded_tiles.append((x, y, tile_path))
-                        print(f"   ✅ Downloaded: {tile_filename}")
+                        print(f"   ✅ Downloaded tile ({x},{y})")
                     else:
-                        print(f"   ❌ Failed tile ({x},{y}): {response.status_code}")
+                        print(f"   ❌ Failed to download tile ({x},{y}): {response.status_code}")
                     
-                    time.sleep(0.1)  # Rate limiting
+                    time.sleep(0.05)  # Rate limiting
                     
                 except Exception as e:
                     print(f"   ⚠️  Error downloading tile ({x},{y}): {e}")
@@ -335,35 +342,25 @@ class NearmapImageExtractor:
         
         print(f"✅ Downloaded {len(downloaded_tiles)}/{total_tiles} tiles")
         
-        # Combine tiles like the working script
-        print("🔧 Combining tiles and removing black borders...")
-        combined_image = self._combine_tiles_transactional(downloaded_tiles, width_tiles, height_tiles)
-        
-        # Crop black borders (important for matching working script)
-        cropped_image, final_size = self._crop_black_borders(combined_image)
-        combined_image.close()
+        # Combine tiles into final image
+        print("🔧 Combining tiles...")
+        combined_image = self._combine_tiles_simple(downloaded_tiles, min_tile_x, min_tile_y, 
+                                                   width_tiles, height_tiles)
         
         # Save final image
-        image_filename = f"{location_name}_nearmap.jpg"
+        image_filename = f"{location_name}_highres.jpg"
         image_path = os.path.join(output_dir, image_filename)
-        cropped_image.save(image_path, 'JPEG', quality=95)
+        combined_image.save(image_path, 'JPEG', quality=95)
         
-        image_width, image_height = final_size
-        cropped_image.close()
+        image_width, image_height = combined_image.size
+        combined_image.close()
         
         print(f"✅ Saved combined image: {image_path}")
-        print(f"📐 Final image size: {image_width}x{image_height} pixels (after cropping)")
+        print(f"📐 Final image size: {image_width}x{image_height} pixels")
         
-        # Clean up temporary tiles
-        print("🧹 Cleaning up temporary tiles...")
-        for x, y, tile_path in downloaded_tiles:
-            try:
-                os.remove(tile_path)
-            except:
-                pass
-        
-        # Calculate resolution based on actual survey data
-        actual_resolution = self._calculate_resolution_from_survey(survey_data, image_width, image_height)
+        # Calculate actual resolution
+        actual_resolution = self._calculate_actual_resolution(min_lon, max_lon, min_lat, max_lat, 
+                                                            image_width, image_height)
         
         # Create metadata
         print("💾 Creating metadata...")
@@ -373,17 +370,24 @@ class NearmapImageExtractor:
             "spatial_reference": "EPSG:3857",
             "width_px": image_width,
             "height_px": image_height,
+            "bounds": {
+                "min_lat": min_lat,
+                "max_lat": max_lat,
+                "min_lon": min_lon,
+                "max_lon": max_lon
+            },
             "extraction_info": {
                 "extracted_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "survey_capture_date": survey_data.get("captureDate", "Unknown"),
                 "survey_id": survey_data.get("id", "Unknown"),
-                "nearmap_api_version": "v3_transactional",
+                "nearmap_api_version": "v3",
+                "bbox_used": bbox,
+                "zoom_level": zoom_level,
                 "tile_grid": {
                     "width_tiles": width_tiles,
                     "height_tiles": height_tiles,
                     "total_tiles": total_tiles,
-                    "downloaded_tiles": len(downloaded_tiles),
-                    "tile_size": "4096x4096"
+                    "downloaded_tiles": len(downloaded_tiles)
                 },
                 "seasonal_selection": {
                     "prioritize_fall": self.prioritize_fall_imagery,
@@ -395,7 +399,7 @@ class NearmapImageExtractor:
             }
         }
         
-        metadata_filename = f"{location_name}_metadata.json"
+        metadata_filename = f"{location_name}_highres_metadata.json"
         metadata_path = os.path.join(output_dir, metadata_filename)
         
         with open(metadata_path, 'w') as f:
@@ -403,95 +407,36 @@ class NearmapImageExtractor:
         
         print(f"💾 Metadata saved: {metadata_path}")
         
+        # Clean up tiles
+        print("🧹 Cleaning up temporary tiles...")
+        for x, y, tile_path in downloaded_tiles:
+            try:
+                os.remove(tile_path)
+            except:
+                pass
+        
+        try:
+            os.rmdir(tiles_dir)
+        except:
+            pass
+        
         # Return results in the format expected by app.py
         return {
             'image_path': image_path,
             'metadata_path': metadata_path,
             'location': location_name,
-            'date_requested': survey_data['captureDate'].split('T')[0],
+            'date_requested': date_str,
             'date_actual': survey_data['captureDate'].split('T')[0],
             'resolution_m_per_pixel': actual_resolution,
             'width_px': image_width,
             'height_px': image_height,
             'tiles_downloaded': len(downloaded_tiles),
-            'extraction_method': 'transactional_tiles',
+            'extraction_method': 'simple_tiles',
             'survey_id': survey_data.get('id', 'unknown')
         }
     
-    def _combine_tiles_transactional(self, downloaded_tiles, width_tiles, height_tiles):
-        """Combine downloaded tiles using transactional method (4096x4096 tiles)"""
-        if not downloaded_tiles or not HAS_PIL:
-            raise ValueError("Cannot combine tiles - PIL not available or no tiles downloaded")
-        
-        # Get tile size from first tile
-        first_tile_path = downloaded_tiles[0][2]
-        first_tile = Image.open(first_tile_path)
-        tile_width, tile_height = first_tile.size
-        first_tile.close()
-        
-        print(f"   📐 Tile size: {tile_width}x{tile_height}")
-        
-        # Create combined image
-        total_width = width_tiles * tile_width
-        total_height = height_tiles * tile_height
-        combined_image = Image.new('RGB', (total_width, total_height))
-        
-        print(f"   📐 Combined size (before crop): {total_width}x{total_height}")
-        
-        # Paste each tile at correct position
-        for x, y, tile_path in downloaded_tiles:
-            if os.path.exists(tile_path):
-                tile_img = Image.open(tile_path)
-                
-                # Calculate paste position
-                paste_x = x * tile_width
-                paste_y = y * tile_height
-                
-                combined_image.paste(tile_img, (paste_x, paste_y))
-                tile_img.close()
-        
-        return combined_image
-    
-    def _crop_black_borders(self, image):
-        """Remove black borders from combined image (essential for transactional method)"""
-        if not HAS_NUMPY:
-            print("   ⚠️  NumPy not available - skipping black border removal")
-            return image, image.size
-        
-        print("   ✂️ Cropping black borders...")
-        
-        # Convert to numpy array for efficient processing
-        img_array = np.array(image)
-        
-        # Find non-black pixels (allowing for slight variations)
-        non_black = np.any(img_array > 10, axis=2)
-        
-        # Get bounding box of non-black region
-        non_black_coords = np.where(non_black)
-        
-        if len(non_black_coords[0]) == 0:
-            print("   ⚠️  Image appears to be all black - returning original")
-            return image, image.size
-        
-        min_y, max_y = non_black_coords[0].min(), non_black_coords[0].max()
-        min_x, max_x = non_black_coords[1].min(), non_black_coords[1].max()
-        
-        # Crop the image
-        cropped_image = image.crop((min_x, min_y, max_x + 1, max_y + 1))
-        new_size = cropped_image.size
-        
-        print(f"   📐 Cropped from {image.size} to {new_size}")
-        
-        return cropped_image, new_size
-    
-    def _calculate_resolution_from_survey(self, survey_data, image_width, image_height):
-        """Calculate resolution based on survey data"""
-        # For transactional method, we can estimate based on typical Nearmap resolutions
-        # This is a placeholder - the working script would have the exact calculation
-        return 0.075  # Approximate meters per pixel for high-res Nearmap
-    
     def _calculate_zoom_for_target_mpp(self, latitude):
-        """Calculate zoom level for target resolution (kept for compatibility)"""
+        """Calculate zoom level for target resolution"""
         cos_lat = math.cos(math.radians(abs(latitude)))
         zoom = math.log2(156543.03392804097 * cos_lat / self.target_mpp)
         
@@ -506,12 +451,61 @@ class NearmapImageExtractor:
         return final_zoom
     
     def _lonlat_to_tile(self, lon, lat, zoom):
-        """Convert longitude/latitude to tile coordinates (kept for compatibility)"""
+        """Convert longitude/latitude to tile coordinates"""
         lat_rad = math.radians(lat)
         n = 2.0 ** zoom
         x = int((lon + 180.0) / 360.0 * n)
         y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
         return x, y
+    
+    def _combine_tiles_simple(self, downloaded_tiles, min_tile_x, min_tile_y, width_tiles, height_tiles):
+        """Combine downloaded tiles into a single image"""
+        if not downloaded_tiles or not HAS_PIL:
+            raise ValueError("Cannot combine tiles - PIL not available or no tiles downloaded")
+        
+        # Get tile size from first tile
+        first_tile_path = downloaded_tiles[0][2]
+        first_tile = Image.open(first_tile_path)
+        tile_width, tile_height = first_tile.size
+        first_tile.close()
+        
+        # Create combined image
+        total_width = width_tiles * tile_width
+        total_height = height_tiles * tile_height
+        combined_image = Image.new('RGB', (total_width, total_height))
+        
+        print(f"   📐 Tile size: {tile_width}x{tile_height}")
+        print(f"   📐 Final size: {total_width}x{total_height}")
+        
+        # Paste each tile
+        for x, y, tile_path in downloaded_tiles:
+            if os.path.exists(tile_path):
+                tile_img = Image.open(tile_path)
+                
+                # Calculate paste position
+                paste_x = (x - min_tile_x) * tile_width
+                paste_y = (y - min_tile_y) * tile_height
+                
+                combined_image.paste(tile_img, (paste_x, paste_y))
+                tile_img.close()
+        
+        return combined_image
+    
+    def _calculate_actual_resolution(self, min_lon, max_lon, min_lat, max_lat, width_px, height_px):
+        """Calculate actual meters per pixel resolution"""
+        # Calculate geographic distance
+        lat_distance = abs(max_lat - min_lat) * 111319.9  # meters per degree latitude
+        
+        # Longitude distance varies by latitude
+        avg_lat_rad = math.radians((min_lat + max_lat) / 2)
+        lon_distance = abs(max_lon - min_lon) * 111319.9 * math.cos(avg_lat_rad)
+        
+        # Calculate resolution (use the larger dimension to be conservative)
+        lat_resolution = lat_distance / height_px
+        lon_resolution = lon_distance / width_px
+        
+        # Return the average resolution
+        return (lat_resolution + lon_resolution) / 2
 
 
 # Legacy compatibility - create aliases for app.py

@@ -1,0 +1,21 @@
+{
+  "location": "CabrilloTech",
+  "epoch": "65",
+  "model_path": "checkpoints/model_epoch_{epoch}.ckpt",
+  "image_path": "data/{location}/images/{location}_blacked_out.jpg",
+  "label_path": "data/{location}/labels/{location}_labels.csv",
+  "output_path": "zoutputs/{location}/{location}_{epoch}_predictions.jpg",
+  "confidence_threshold": 0.25,
+  "iou_threshold": 0.9,
+  "patch_size": 800,
+  "overlap_size": 200,
+  "enable_postprocessing": true,
+  "containment_threshold": 0.5,
+  "show_removed_boxes": false,
+  "validation_method": "containment",
+  "kml_file": "data/{location}/{location}.kml",
+  "validation_log_file": "validation_log.csv",
+  "enable_adaptive_confidence": true,
+  "iou_threshold_validation": 0.25,
+  "adaptive_confidence_k": 2.0
+}

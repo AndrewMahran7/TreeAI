@@ -201,12 +201,13 @@ FORCE_SKIP_DEPENDENCIES = True  # Skip problematic dependencies
 
 AVAILABLE_MODELS = {
     'model_5' : 'model_epoch_5.ckpt',
-    'model_15': 'model_epoch_15.ckpt',  # Default
+    'model_15': 'model_epoch_15.ckpt',
     'model_25': 'model_epoch_25.ckpt',
     'model_35': 'model_epoch_35.ckpt',
     'model_45': 'model_epoch_45.ckpt',
     'model_55': 'model_epoch_55.ckpt',
-    'model_65': 'model_epoch_65.ckpt',
+    'model_65': 'model_epoch_65.ckpt',  # New default
+    'model_180': 'model_epoch_180.ckpt',
 }
 
 DEFAULT_SETTINGS = config.get('default_settings', {
@@ -571,7 +572,7 @@ def get_available_models():
             'filename': filename,
             'path': model_path,
             'exists': model_path is not None,
-            'default': key == 'model_55'
+            'default': key == 'model_65'
         })
     return jsonify(models)
 
@@ -594,6 +595,186 @@ def get_available_dates():
                 })
     
     return jsonify(sorted(dates, key=lambda x: x['value'], reverse=True))
+
+@app.route('/api/upload-kml', methods=['POST'])
+def upload_kml():
+    """Upload and parse KML file to extract geofence coordinates"""
+    try:
+        print("📁 KML upload request received")
+        
+        if 'file' not in request.files:
+            print("❌ No file in request")
+            return jsonify({'error': 'No KML file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            print("❌ Empty filename")
+            return jsonify({'error': 'No file selected'}), 400
+        
+        print(f"📄 Processing file: {file.filename}")
+        
+        if not file.filename.lower().endswith(('.kml', '.kmz')):
+            print(f"❌ Invalid file extension: {file.filename}")
+            return jsonify({'error': 'File must be a KML or KMZ file'}), 400
+        
+        # Read file content
+        file_content = file.read()
+        print(f"📊 File size: {len(file_content)} bytes")
+        
+        try:
+            # Parse KML content
+            print("🔍 Parsing KML coordinates...")
+            coordinates = parse_kml_coordinates(file_content, file.filename)
+            print(f"✅ Found {len(coordinates)} coordinates")
+            
+            if not coordinates or len(coordinates) < 3:
+                print("❌ Insufficient coordinates")
+                return jsonify({'error': 'KML file must contain at least 3 coordinates for a valid polygon'}), 400
+            
+            # Calculate area and cost
+            print("📐 Calculating area and cost...")
+            area_info = calculate_area_and_cost(coordinates)
+            print(f"✅ Area calculated: {area_info.get('area_acres', 0):.2f} acres")
+            
+            result = {
+                'success': True,
+                'coordinates': coordinates,
+                'area_info': area_info,
+                'filename': file.filename,
+                'coordinate_count': len(coordinates)
+            }
+            print("🎉 KML processing successful")
+            return jsonify(result)
+            
+        except Exception as e:
+            print(f"❌ KML parsing error: {str(e)}")
+            return jsonify({'error': f'Error parsing KML file: {str(e)}'}), 400
+            
+    except Exception as e:
+        print(f"❌ Upload processing error: {str(e)}")
+        return jsonify({'error': f'Error processing file upload: {str(e)}'}), 500
+
+def parse_kml_coordinates(file_content, filename):
+    """Parse KML/KMZ file to extract polygon coordinates"""
+    import xml.etree.ElementTree as ET
+    import zipfile
+    import io
+    
+    try:
+        # Handle KMZ files (zipped KML)
+        if filename.lower().endswith('.kmz'):
+            with zipfile.ZipFile(io.BytesIO(file_content), 'r') as kmz:
+                # Look for .kml files in the archive
+                kml_files = [name for name in kmz.namelist() if name.lower().endswith('.kml')]
+                if not kml_files:
+                    raise ValueError("No KML files found in KMZ archive")
+                
+                # Use the first KML file found
+                with kmz.open(kml_files[0]) as kml_file:
+                    file_content = kml_file.read()
+        
+        # Parse XML content
+        if isinstance(file_content, bytes):
+            file_content = file_content.decode('utf-8')
+        
+        # Remove namespace prefixes for simpler parsing
+        file_content = file_content.replace('xmlns=', 'xmlnamespace=')
+        
+        root = ET.fromstring(file_content)
+        
+        # Look for coordinates in various KML structures
+        coordinates = []
+        
+        # Try different XPath patterns for coordinates
+        coordinate_patterns = [
+            './/coordinates',
+            './/Polygon//coordinates',
+            './/LinearRing//coordinates',
+            './/outerBoundaryIs//coordinates',
+            './/Placemark//Polygon//coordinates'
+        ]
+        
+        for pattern in coordinate_patterns:
+            coord_elements = root.findall(pattern)
+            if coord_elements:
+                coord_text = coord_elements[0].text.strip()
+                if coord_text:
+                    coordinates = parse_coordinate_string(coord_text)
+                    break
+        
+        if not coordinates:
+            # Fallback: look for any text that looks like coordinates
+            for elem in root.iter():
+                if elem.text and (',' in elem.text) and (any(c.isdigit() or c in '.-' for c in elem.text)):
+                    try:
+                        coordinates = parse_coordinate_string(elem.text)
+                        if len(coordinates) >= 3:
+                            break
+                    except:
+                        continue
+        
+        if not coordinates:
+            raise ValueError("No valid polygon coordinates found in KML file")
+        
+        print(f"✅ Parsed {len(coordinates)} coordinates from KML file: {filename}")
+        return coordinates
+        
+    except ET.ParseError as e:
+        raise ValueError(f"Invalid XML format in KML file: {str(e)}")
+    except Exception as e:
+        raise ValueError(f"Error parsing KML file: {str(e)}")
+
+def parse_coordinate_string(coord_text):
+    """Parse coordinate string from KML format to lat/lon pairs"""
+    coordinates = []
+    
+    print(f"   🔍 Raw coordinate string length: {len(coord_text)} characters")
+    print(f"   📝 First 100 chars: {coord_text[:100]}...")
+    
+    # Clean up the coordinate text and split by whitespace
+    coord_text = coord_text.strip().replace('\n', ' ').replace('\t', ' ')
+    coord_parts = coord_text.split()
+    
+    print(f"   📊 Split into {len(coord_parts)} coordinate triplets")
+    
+    for i, coord_part in enumerate(coord_parts):
+        try:
+            # Each part should be "lon,lat,alt" or "lon,lat"
+            parts = coord_part.split(',')
+            if len(parts) >= 2:
+                lon = float(parts[0])
+                lat = float(parts[1])
+                
+                # Basic validation for reasonable Earth coordinates
+                if -180 <= lon <= 180 and -90 <= lat <= 90:
+                    # Store as [latitude, longitude] format for consistency
+                    coordinates.append([lat, lon])
+                    
+                    if i < 3:  # Log first few coordinates for debugging
+                        print(f"   🎯 Coordinate {i+1}: lon={lon:.8f}, lat={lat:.8f} -> [{lat:.8f}, {lon:.8f}] (lat, lon)")
+                else:
+                    print(f"   ⚠️ Invalid coordinates: lon={lon}, lat={lat}")
+                    
+        except (ValueError, IndexError) as e:
+            print(f"   ❌ Error parsing coordinate '{coord_part}': {e}")
+            continue
+    
+    print(f"   ✅ Successfully parsed {len(coordinates)} valid coordinates")
+    
+    if coordinates:
+        print(f"   📍 First coordinate: [{coordinates[0][0]:.8f}, {coordinates[0][1]:.8f}] (lat, lon)")
+        print(f"   📍 Last coordinate: [{coordinates[-1][0]:.8f}, {coordinates[-1][1]:.8f}] (lat, lon)")
+    
+    # Remove duplicate coordinates (common in KML files)
+    unique_coords = []
+    for coord in coordinates:
+        if not unique_coords or (abs(coord[0] - unique_coords[-1][0]) > 1e-8 or 
+                                abs(coord[1] - unique_coords[-1][1]) > 1e-8):
+            unique_coords.append(coord)
+    
+    print(f"   🔄 After removing duplicates: {len(unique_coords)} unique coordinates")
+    
+    return unique_coords
 
 @app.route('/api/calculate-area', methods=['POST'])
 def calculate_area():
@@ -621,6 +802,26 @@ def start_processing():
         geofence = data.get('geofence', [])
         if len(geofence) < 3:
             return jsonify({'error': 'Invalid geofence coordinates'}), 400
+        
+        print(f"🔍 DEBUG: Received {len(geofence)} coordinates from frontend")
+        if geofence:
+            print(f"   📍 First coordinate: {geofence[0]}")
+            print(f"   📍 Coordinate format detection:")
+            
+            # Detect if coordinates are in [lon, lat] instead of [lat, lon]
+            first_coord = geofence[0]
+            if len(first_coord) >= 2:
+                val1, val2 = first_coord[0], first_coord[1]
+                # If first value is in longitude range (-180 to 180) and second is in latitude range (-90 to 90)
+                # then coordinates are [lon, lat] and need to be swapped
+                if abs(val1) > 90 and abs(val2) <= 90:
+                    print(f"   🔄 Coordinates appear to be [lon, lat], swapping to [lat, lon]")
+                    geofence = [[coord[1], coord[0]] for coord in geofence]
+                    print(f"   ✅ After swap: {geofence[0]} (now [lat, lon])")
+                elif abs(val1) <= 90 and abs(val2) > 90:
+                    print(f"   ✅ Coordinates appear to be [lat, lon], keeping as-is")
+                else:
+                    print(f"   ⚠️ Cannot determine coordinate order, assuming [lat, lon]")
         
         # Generate job ID
         job_id = str(uuid.uuid4())
@@ -709,40 +910,83 @@ def download_all_files(job_id):
 
 def calculate_area_and_cost(geofence_coords):
     """Calculate area in acres and total cost"""
-    if HAS_GEO:
-        # Use accurate projection-based calculation
-        transformer = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-        projected_coords = [transformer.transform(lon, lat) for lon, lat in geofence_coords]
+    try:
+        print(f"📐 Calculating area from {len(geofence_coords)} coordinates...")
         
-        polygon = Polygon(projected_coords)
-        area_sq_meters = polygon.area
-    else:
-        # Use approximate calculation (Shoelace formula with rough conversion)
-        print("Using approximate area calculation (install Shapely for accurate results)")
+        # Debug: Show coordinate bounds
+        if geofence_coords:
+            lats = [coord[0] for coord in geofence_coords]
+            lons = [coord[1] for coord in geofence_coords]
+            
+            min_lat, max_lat = min(lats), max(lats)
+            min_lon, max_lon = min(lons), max(lons)
+            
+            print(f"   📍 Latitude range: {min_lat:.8f} to {max_lat:.8f} (span: {max_lat-min_lat:.8f}°)")
+            print(f"   📍 Longitude range: {min_lon:.8f} to {max_lon:.8f} (span: {max_lon-min_lon:.8f}°)")
+            
+            # Rough distance calculation for validation
+            lat_km = (max_lat - min_lat) * 111.32  # degrees to km
+            avg_lat = (min_lat + max_lat) / 2
+            lon_km = (max_lon - min_lon) * 111.32 * abs(safe_cos(safe_radians(avg_lat)))
+            
+            print(f"   📏 Approximate bounds: {lat_km:.0f}m x {lon_km:.0f}m")
         
-        # Simple polygon area calculation using Shoelace formula
-        n = len(geofence_coords)
-        area = 0.0
-        for i in range(n):
-            j = (i + 1) % n
-            area += geofence_coords[i][0] * geofence_coords[j][1]
-            area -= geofence_coords[j][0] * geofence_coords[i][1]
-        area = abs(area) / 2.0
+        if HAS_GEO:
+            # Use accurate projection-based calculation
+            transformer = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+            
+            # Note: geofence_coords are in [lat, lon] format, but transformer expects [lon, lat]
+            projected_coords = [transformer.transform(coord[1], coord[0]) for coord in geofence_coords]
+            
+            polygon = Polygon(projected_coords)
+            area_sq_meters = polygon.area
+            print(f"   ✅ Used Shapely for accurate area calculation: {area_sq_meters:.2f} sq meters")
+        else:
+            # Use approximate calculation (Shoelace formula with rough conversion)
+            print("   ⚠️ Using approximate area calculation (install Shapely for accurate results)")
+            
+            # Simple polygon area calculation using Shoelace formula
+            n = len(geofence_coords)
+            area = 0.0
+            for i in range(n):
+                j = (i + 1) % n
+                # geofence_coords are [lat, lon], so swap for calculation
+                area += geofence_coords[i][1] * geofence_coords[j][0]
+                area -= geofence_coords[j][1] * geofence_coords[i][0]
+            area = abs(area) / 2.0
+            
+            # Rough conversion from decimal degrees to square meters (very approximate!)
+            # This is only for demo purposes - real deployment should use proper projections
+            lat_avg = sum(coord[0] for coord in geofence_coords) / len(geofence_coords)
+            meters_per_degree = 111320 * abs(safe_cos(safe_radians(lat_avg)))
+            area_sq_meters = area * (meters_per_degree ** 2)
+            print(f"   ⚠️ Approximate area calculation: {area_sq_meters:.2f} sq meters")
         
-        # Rough conversion from decimal degrees to square meters (very approximate!)
-        # This is only for demo purposes - real deployment should use proper projections
-        lat_avg = sum(coord[1] for coord in geofence_coords) / len(geofence_coords)
-        meters_per_degree = 111320 * abs(safe_cos(safe_radians(lat_avg)))
-        area_sq_meters = area * (meters_per_degree ** 2)
-    
-    area_acres = area_sq_meters / 4047  # Convert to acres
-    cost = area_acres * 500  # $500 per acre
-    
-    return {
-        'acres': round(area_acres, 3),
-        'square_meters': round(area_sq_meters, 2),
-        'cost_usd': round(cost, 2)
-    }
+        area_acres = area_sq_meters / 4047  # Convert to acres
+        cost = area_acres * 500  # $500 per acre
+        
+        # Ensure we don't return NaN or infinite values
+        area_acres = 0.0 if not (area_acres > 0) else area_acres
+        area_sq_meters = 0.0 if not (area_sq_meters > 0) else area_sq_meters
+        cost = 0.0 if not (cost > 0) else cost
+        
+        result = {
+            'acres': round(area_acres, 3),
+            'square_meters': round(area_sq_meters, 2),
+            'cost_usd': round(cost, 2)
+        }
+        
+        print(f"📐 Area calculation result: {result['acres']} acres, {result['square_meters']} sq meters")
+        return result
+        
+    except Exception as e:
+        print(f"❌ Error calculating area: {e}")
+        # Return safe default values instead of NaN
+        return {
+            'acres': 0.0,
+            'square_meters': 0.0,
+            'cost_usd': 0.0
+        }
 
 def estimate_processing_time(acres):
     """Estimate processing time based on area"""
@@ -817,10 +1061,10 @@ def extract_nearmap_step(job):
         geofence = job['geofence']
         mock_metadata = {
             'bounds': {
-                'min_lat': min(coord[1] for coord in geofence),
-                'max_lat': max(coord[1] for coord in geofence),
-                'min_lon': min(coord[0] for coord in geofence),
-                'max_lon': max(coord[0] for coord in geofence)
+                'min_lat': min(coord[0] for coord in geofence),  # coord[0] is lat
+                'max_lat': max(coord[0] for coord in geofence),  # coord[0] is lat  
+                'min_lon': min(coord[1] for coord in geofence),  # coord[1] is lon
+                'max_lon': max(coord[1] for coord in geofence)   # coord[1] is lon
             },
             'area_acres': job['area_info']['acres'],
             'resolution_mpp': 0.075,
@@ -1143,6 +1387,33 @@ def process_image_step(job):
         mask_text = f"Geofence Mask\n(Fallback Mode)"
         create_placeholder_image(800, 600, mask_text, job['files']['geofence_mask'])
 
+def get_optimal_patch_size(image_path, requested_patch_size):
+    """Calculate optimal patch size based on image dimensions"""
+    try:
+        if HAS_PIL:
+            with Image.open(image_path) as img:
+                width, height = img.size
+        else:
+            # Fallback if PIL not available
+            return requested_patch_size
+    except:
+        # If we can't read the image, return the requested size
+        return requested_patch_size
+    
+    # Use smaller dimension as the limit
+    max_dimension = min(width, height)
+    
+    # If requested patch size is larger than image, use 80% of smaller dimension
+    if requested_patch_size >= max_dimension:
+        optimal_patch_size = int(max_dimension * 0.8)
+        # Round down to nearest multiple of 64 for efficiency
+        optimal_patch_size = (optimal_patch_size // 64) * 64
+        
+        print(f"   ⚠️  Patch size adjusted: {requested_patch_size} → {optimal_patch_size} (image: {width}x{height})")
+        return max(64, optimal_patch_size)  # Minimum 64px
+    
+    return requested_patch_size
+
 def run_model_step(job):
     """Step 3: Run DeepForest model using production pipeline"""
     import time
@@ -1156,16 +1427,21 @@ def run_model_step(job):
         print(f"Using ProductionPipeline for job {job['id']}")
         
         try:
-            # Create production configuration from job settings
+            # Create production configuration from job settings with validation-matching defaults
             config = create_production_config(
                 confidence_threshold=job['settings'].get('confidence_threshold', 0.25),
-                iou_threshold=job['settings'].get('iou_threshold', 0.7),
-                patch_size=job['settings'].get('patch_size', 1000),
-                patch_overlap=job['settings'].get('patch_overlap', 0.35),
-                containment_threshold=job['settings'].get('containment_threshold', 0.75),
+                iou_threshold=job['settings'].get('iou_threshold', 0.9),
+                patch_size=job['settings'].get('patch_size', 800),
+                patch_overlap=job['settings'].get('patch_overlap', 0.25),
+                overlap_size=job['settings'].get('overlap_size', 200),
+                containment_threshold=job['settings'].get('containment_threshold', 0.5),
                 enable_postprocessing=job['settings'].get('enable_postprocessing', True),
-                enable_adaptive_filtering=True,
-                show_removed_boxes=True,
+                enable_adaptive_filtering=job['settings'].get('enable_adaptive_confidence', True),
+                adaptive_confidence_k=job['settings'].get('adaptive_confidence_k', 2.0),
+                show_removed_boxes=job['settings'].get('show_removed_boxes', False),
+                validation_method=job['settings'].get('validation_method', 'containment'),
+                iou_threshold_validation=job['settings'].get('iou_threshold_validation', 0.25),
+                enable_adaptive_confidence=job['settings'].get('enable_adaptive_confidence', True),
                 save_csv=True,
                 save_summary=True
             )
@@ -1337,10 +1613,14 @@ def run_model_step(job):
         image = Image.open(processed_image_path)
         print(f"Loaded processed image: {image.size} pixels")
         
+        # Get optimal patch size based on image dimensions
+        requested_patch_size = job['settings'].get('patch_size', 1000)
+        optimal_patch_size = get_optimal_patch_size(processed_image_path, requested_patch_size)
+        
         # Run AI predictions on the processed (normalized + masked) image
         predictions_df = model.predict_tile(
             processed_image_path,
-            patch_size=job['settings'].get('patch_size', 1000),
+            patch_size=optimal_patch_size,
             patch_overlap=job['settings'].get('patch_overlap', 0.35),
             iou_threshold=job['settings'].get('iou_threshold', 0.25)
         )
@@ -1387,36 +1667,62 @@ def run_model_step(job):
         job['results']['fallback_reason'] = str(e)
 
 def convert_deepforest_predictions(predictions_df, job):
-    """Convert DeepForest predictions to our standard format"""
+    """Convert DeepForest predictions with corrected spatial resolution handling"""
     if predictions_df.empty:
         return []
     
     predictions = []
     
-    # Use normalized metadata if available (for proper coordinate conversion of processed images)
-    normalized_metadata_path = None
-    if 'normalized_metadata' in job['files']:
-        normalized_metadata_path = job['files']['normalized_metadata']
+    # CRITICAL FIX: Ensure we're using the right metadata for the processed image
+    processed_image_path = job['files']['processed_image']
     
-    metadata_path = normalized_metadata_path if normalized_metadata_path and os.path.exists(normalized_metadata_path) else job['files']['metadata']
+    # Get the actual dimensions of the processed image that the AI used
+    try:
+        if HAS_PIL:
+            with Image.open(processed_image_path) as img:
+                actual_width_px, actual_height_px = img.size
+                print(f"   📐 ACTUAL processed image dimensions: {actual_width_px}x{actual_height_px}")
+        else:
+            actual_width_px, actual_height_px = 800, 600
+    except Exception as e:
+        print(f"   ❌ Could not read processed image dimensions: {e}")
+        actual_width_px, actual_height_px = 800, 600
     
-    # Load metadata to convert pixel coordinates to lat/lon
+    # Load the correct metadata for coordinate bounds
+    # Use normalized metadata if available, otherwise original
+    metadata_path = None
+    if 'normalized_metadata' in job['files'] and os.path.exists(job['files']['normalized_metadata']):
+        metadata_path = job['files']['normalized_metadata']
+        print(f"   ✅ Using normalized metadata: {metadata_path}")
+    else:
+        metadata_path = job['files']['metadata']
+        print(f"   ⚠️  Using original metadata: {metadata_path}")
+    
     try:
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
         
-        print(f"   Using metadata for coordinate conversion: {metadata_path}")
-        if normalized_metadata_path:
-            print(f"   ✓ Using normalized metadata for proper processed image coordinate mapping")
-        
         bounds = metadata['bounds']
-        image_size = metadata.get('image_size', metadata)
-        width_px = image_size.get('width', 800)
-        height_px = image_size.get('height', 600)
+        print(f"   🌍 Geographic bounds: {bounds}")
+        
+        # CRITICAL: Use the ACTUAL image dimensions, not metadata dimensions
+        width_px = actual_width_px
+        height_px = actual_height_px
+        
+        # Check if metadata dimensions match actual image
+        metadata_width = metadata.get('width_px') or metadata.get('image_size', {}).get('width', 0)
+        metadata_height = metadata.get('height_px') or metadata.get('image_size', {}).get('height', 0)
+        
+        if metadata_width and metadata_height:
+            if (metadata_width != actual_width_px or metadata_height != actual_height_px):
+                print(f"   ⚠️  METADATA MISMATCH!")
+                print(f"       Metadata says: {metadata_width}x{metadata_height}")
+                print(f"       Actual image:  {actual_width_px}x{actual_height_px}")
+                print(f"       Using ACTUAL image dimensions for conversion")
         
     except Exception as e:
-        print(f"Warning: Could not load metadata for coordinate conversion: {e}")
-        # Use geofence bounds as fallback
+        print(f"   ❌ Error loading metadata: {e}")
+        # Fallback to geofence bounds
         geofence = job['geofence']
         bounds = {
             'min_lat': min(coord[1] for coord in geofence),
@@ -1424,20 +1730,65 @@ def convert_deepforest_predictions(predictions_df, job):
             'min_lon': min(coord[0] for coord in geofence),
             'max_lon': max(coord[0] for coord in geofence)
         }
-        width_px, height_px = 800, 600
+        width_px, height_px = actual_width_px, actual_height_px
+        print(f"   ⚠️  Using fallback bounds from geofence")
     
-    for _, row in predictions_df.iterrows():
+    # Calculate geographic extent
+    lon_range = bounds['max_lon'] - bounds['min_lon']
+    lat_range = bounds['max_lat'] - bounds['min_lat']
+    
+    print(f"   📏 COORDINATE CONVERSION SETUP:")
+    print(f"       Image: {width_px}x{height_px} pixels")
+    print(f"       Geographic range: {lon_range:.8f}° lon, {lat_range:.8f}° lat")
+    print(f"       Pixels per degree: {width_px/lon_range:.1f} px/lon°, {height_px/lat_range:.1f} px/lat°")
+    print(f"       Meters per pixel: {111320 * lon_range / width_px:.3f} m/px lon, {111320 * lat_range / height_px:.3f} m/px lat")
+    
+    for idx, row in predictions_df.iterrows():
         # Convert pixel coordinates to lat/lon
         center_x = (row['xmin'] + row['xmax']) / 2
         center_y = (row['ymin'] + row['ymax']) / 2
         
-        # Convert to geographic coordinates
-        lon = bounds['min_lon'] + (center_x / width_px) * (bounds['max_lon'] - bounds['min_lon'])
-        lat = bounds['max_lat'] - (center_y / height_px) * (bounds['max_lat'] - bounds['min_lat'])
-        
-        # Calculate box dimensions
+        # Filter out edge artifacts and very small detections
         box_width = row['xmax'] - row['xmin']
         box_height = row['ymax'] - row['ymin']
+        
+        # Skip detections that are too small or too close to edges
+        min_box_size = 8  # Minimum box size in pixels
+        edge_buffer = 5   # Pixels from edge to consider as edge artifact
+        
+        if (box_width < min_box_size or box_height < min_box_size or
+            row['xmin'] <= edge_buffer or row['ymin'] <= edge_buffer or
+            row['xmax'] >= (width_px - edge_buffer) or row['ymax'] >= (height_px - edge_buffer)):
+            
+            if idx < 5:  # Debug first few
+                print(f"   ⚠️  Skipping edge/small detection {idx+1}: box=({row['xmin']:.0f},{row['ymin']:.0f},{row['xmax']:.0f},{row['ymax']:.0f}) size={box_width:.0f}x{box_height:.0f}")
+            continue
+        
+        # Convert pixel coordinates to geographic coordinates
+        # IMPORTANT: Ensure we're mapping pixel center to geographic center correctly
+        
+        # X axis: pixel 0 = min_lon, pixel width_px = max_lon
+        # Normalize center_x to 0-1 range, then map to lon range
+        lon_normalized = center_x / width_px
+        lon = bounds['min_lon'] + lon_normalized * lon_range
+        
+        # Y axis: pixel 0 = max_lat (top of image), pixel height_px = min_lat (bottom of image)
+        # Normalize center_y to 0-1 range, then map to lat range (inverted)
+        lat_normalized = center_y / height_px
+        lat = bounds['max_lat'] - lat_normalized * lat_range
+        
+        # Enhanced debugging for first few predictions
+        if idx < 5:
+            print(f"   🎯 Prediction {idx+1}:")
+            print(f"       Pixel bbox: ({row['xmin']:.0f},{row['ymin']:.0f},{row['xmax']:.0f},{row['ymax']:.0f})")
+            print(f"       Pixel center: ({center_x:.1f}, {center_y:.1f})")
+            print(f"       Normalized: ({lon_normalized:.4f}, {lat_normalized:.4f})")
+            print(f"       Geographic: ({lon:.8f}, {lat:.8f})")
+            print(f"       Box size: {box_width:.0f}x{box_height:.0f} pixels")
+        
+        # Calculate box dimensions (already calculated above for filtering)
+        # box_width = row['xmax'] - row['xmin']
+        # box_height = row['ymax'] - row['ymin']
         
         prediction = {
             'latitude': lat,
@@ -1457,6 +1808,7 @@ def convert_deepforest_predictions(predictions_df, job):
         
         predictions.append(prediction)
     
+    print(f"   ✅ Converted {len(predictions)} predictions with CORRECTED coordinate mapping")
     return predictions
 
 def apply_post_processing_filters(predictions, settings):
@@ -1827,16 +2179,23 @@ def create_kml_from_geofence(geofence_coords, kml_path):
     if len(coords) < 3:
         raise ValueError(f"KML polygon must contain at least 3 coordinates, got {len(coords)}")
     
+    print(f"   🔍 Creating KML from {len(coords)} coordinates...")
+    print(f"   📍 First coord (should be [lat, lon]): {coords[0]}")
+    
     # Ensure polygon is closed (first and last point should be the same)
     if coords[0] != coords[-1]:
         coords.append(coords[0])
     
     # Format coordinates as lon,lat,altitude (altitude=0)
+    # NOTE: Our coords are stored as [lat, lon], but KML expects lon,lat,alt
     coord_strings = []
-    for coord in coords:
+    for i, coord in enumerate(coords):
         if len(coord) >= 2:
-            lon, lat = coord[0], coord[1]
-            coord_strings.append(f"{lon},{lat},0")
+            lat, lon = coord[0], coord[1]  # Our format is [lat, lon]
+            coord_strings.append(f"{lon},{lat},0")  # KML format is lon,lat,alt
+            
+            if i < 3:  # Debug first few coordinates
+                print(f"   🎯 Coord {i+1}: [{lat:.8f}, {lon:.8f}] -> {lon:.8f},{lat:.8f},0")
     
     coordinates_text = " ".join(coord_strings)
     

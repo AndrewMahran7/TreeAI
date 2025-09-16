@@ -94,6 +94,22 @@ function initializeUI() {
     // Processing button
     document.getElementById('start-processing').addEventListener('click', startProcessing);
     
+    // KML Upload functionality
+    const kmlUploadLabel = document.querySelector('label[for="kml-file-input"]');
+    if (kmlUploadLabel) {
+        kmlUploadLabel.addEventListener('click', function() {
+            console.log('KML upload label clicked');
+        });
+    }
+    
+    const kmlFileInput = document.getElementById('kml-file-input');
+    if (kmlFileInput) {
+        kmlFileInput.addEventListener('change', handleKMLUpload);
+        console.log('KML file input event listener attached');
+    } else {
+        console.error('KML file input element not found');
+    }
+    
     // Settings listeners
     document.getElementById('confidence-threshold').addEventListener('change', validateSettings);
     document.getElementById('iou-threshold').addEventListener('change', validateSettings);
@@ -260,6 +276,10 @@ function displayAreaInfo(areaInfo) {
     document.getElementById('area-acres').textContent = `${areaInfo.acres} acres`;
     document.getElementById('area-meters').textContent = `${areaInfo.square_meters.toLocaleString()} m²`;
     document.getElementById('total-cost').textContent = areaInfo.cost_usd.toLocaleString();
+    
+    // Calculate and display estimated time
+    const estimatedMinutes = Math.max(1, Math.round(areaInfo.acres * 2.5));
+    document.getElementById('estimated-time').textContent = `${estimatedMinutes} minutes`;
     
     // Update header display
     document.getElementById('cost-display').textContent = `Estimated Cost: $${areaInfo.cost_usd.toLocaleString()}`;
@@ -739,6 +759,245 @@ function validateSettings() {
     if (iou < 0.1 || iou > 1.0) {
         showAlert('IOU threshold must be between 0.1 and 1.0', 'warning');
     }
+}
+
+// ============================================================================
+// KML UPLOAD FUNCTIONALITY
+// ============================================================================
+
+async function handleKMLUpload(event) {
+    console.log('handleKMLUpload function called');
+    const file = event.target.files[0];
+    if (!file) {
+        console.log('No file selected');
+        return;
+    }
+    
+    console.log('File selected:', file.name, 'Type:', file.type, 'Size:', file.size);
+    
+    // Check file type
+    const validTypes = ['application/vnd.google-earth.kml+xml', 'application/vnd.google-earth.kmz', 'text/xml', 'application/xml'];
+    const validExtensions = ['.kml', '.kmz'];
+    const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
+    
+    console.log('File extension:', fileExtension);
+    
+    if (!validTypes.includes(file.type) && !validExtensions.includes(fileExtension)) {
+        console.log('Invalid file type');
+        showAlert('Please select a valid KML or KMZ file', 'error');
+        return;
+    }
+    
+    // Show loading status
+    const statusDiv = document.getElementById('kml-upload-status');
+    if (!statusDiv) {
+        console.error('Upload status div not found');
+        showAlert('Upload interface not properly initialized', 'error');
+        return;
+    }
+    
+    statusDiv.className = 'upload-status loading';
+    statusDiv.textContent = 'Uploading and processing file...';
+    statusDiv.style.display = 'block';
+    
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        console.log('Uploading KML file:', file.name, 'Size:', file.size, 'bytes');
+        
+        const response = await fetch('/api/upload-kml', {
+            method: 'POST',
+            body: formData
+        });
+        
+        console.log('Upload response status:', response.status);
+        
+        const result = await response.json();
+        console.log('Upload result:', result);
+        
+        if (result.success) {
+            // Clear existing polygons
+            drawnItems.clearLayers();
+            currentGeofence = null;
+            
+            // Add the polygon to the map
+            if (result.coordinates && result.coordinates.length > 0) {
+                console.log('Creating polygon with coordinates:', result.coordinates.length, 'points');
+                console.log('First few coordinates:', result.coordinates.slice(0, 3));
+                
+                // Ensure coordinates are in the correct format [lat, lng]
+                let processedCoords = result.coordinates.map(coord => {
+                    // Handle different coordinate formats
+                    if (Array.isArray(coord) && coord.length >= 2) {
+                        // Already in array format [lat, lng] or [lng, lat, alt]
+                        return [parseFloat(coord[0]), parseFloat(coord[1])];
+                    } else if (typeof coord === 'object' && coord.lat && coord.lng) {
+                        // Object format {lat: x, lng: y}
+                        return [parseFloat(coord.lat), parseFloat(coord.lng)];
+                    } else {
+                        console.error('Invalid coordinate format:', coord);
+                        return null;
+                    }
+                }).filter(coord => coord !== null);
+                
+                console.log('Processed coordinates:', processedCoords.length, 'valid points');
+                console.log('Coordinate sample:', processedCoords.slice(0, 3));
+                
+                if (processedCoords.length < 3) {
+                    throw new Error('Not enough valid coordinates to create a polygon');
+                }
+                
+                const polygon = L.polygon(processedCoords, {
+                    color: '#2e8b57',
+                    fillColor: '#2e8b57',
+                    fillOpacity: 0.2,
+                    weight: 3,
+                    opacity: 0.8
+                });
+                
+                // Add polygon to map
+                drawnItems.addLayer(polygon);
+                currentGeofence = polygon;
+                
+                console.log('Polygon created and added to map');
+                console.log('Polygon bounds:', polygon.getBounds());
+                
+                // Update UI first
+                updateAreaInfoFromKML(result.area_info);
+                if (typeof updateUIState === 'function') {
+                    updateUIState();
+                }
+                
+                // Fit map to polygon bounds with padding for better visibility
+                setTimeout(() => {
+                    try {
+                        const bounds = polygon.getBounds();
+                        console.log('Fitting map to bounds:', bounds);
+                        
+                        // Check if bounds are valid
+                        if (bounds.isValid()) {
+                            // Add generous padding and set minimum zoom constraints
+                            map.fitBounds(bounds.pad(0.2), {
+                                maxZoom: 16,
+                                animate: true,
+                                duration: 1.0
+                            });
+                            console.log('Map zoomed to geofence successfully');
+                            console.log('Current map center:', map.getCenter());
+                            console.log('Current map zoom:', map.getZoom());
+                        } else {
+                            console.error('Invalid bounds:', bounds);
+                            throw new Error('Invalid polygon bounds - cannot zoom to area');
+                        }
+                    } catch (zoomError) {
+                        console.error('Error zooming to geofence:', zoomError);
+                        showAlert('Geofence created but could not zoom to area', 'warning');
+                    }
+                }, 300);
+                
+                // Show success status
+                statusDiv.className = 'upload-status success';
+                statusDiv.textContent = `Successfully loaded geofence with ${result.coordinates.length} points - Zooming to area...`;
+                
+                // Also show a more prominent alert
+                showAlert(`KML file loaded successfully! Created geofence polygon with ${processedCoords.length} points.`, 'success');
+                
+                // Hide status after 5 seconds
+                setTimeout(() => {
+                    statusDiv.style.display = 'none';
+                }, 5000);
+                
+            } else {
+                throw new Error('No valid coordinates found in the file');
+            }
+            
+        } else {
+            console.error('Upload failed:', result.error);
+            throw new Error(result.error || 'Failed to process KML file');
+        }
+        
+    } catch (error) {
+        console.error('KML upload error:', error);
+        statusDiv.className = 'upload-status error';
+        statusDiv.textContent = `Error: ${error.message}`;
+        
+        // Also show a prominent alert
+        showAlert(`KML upload failed: ${error.message}`, 'error');
+        
+        // Hide status after 8 seconds for errors
+        setTimeout(() => {
+            statusDiv.style.display = 'none';
+        }, 8000);
+    }
+    
+    // Clear the file input
+    event.target.value = '';
+}
+
+// ============================================================================
+// AREA INFORMATION UPDATE FROM KML
+// ============================================================================
+
+function updateAreaInfoFromKML(areaInfo) {
+    console.log('Updating area info from KML:', areaInfo);
+    
+    if (!areaInfo) {
+        console.warn('No area info provided');
+        return;
+    }
+    
+    // Show the area info section
+    const areaSection = document.getElementById('area-info');
+    if (areaSection) {
+        areaSection.classList.remove('hidden');
+    }
+    
+    // Update area display
+    const areaAcres = document.getElementById('area-acres');
+    const areaMeters = document.getElementById('area-meters');
+    const totalCost = document.getElementById('total-cost');
+    const estimatedTime = document.getElementById('estimated-time');
+    
+    if (areaAcres && areaInfo.acres !== undefined) {
+        areaAcres.textContent = `${areaInfo.acres.toFixed(2)} acres`;
+    }
+    
+    if (areaMeters && areaInfo.square_meters !== undefined) {
+        areaMeters.textContent = `${areaInfo.square_meters.toLocaleString()} m²`;
+    }
+    
+    if (totalCost && areaInfo.cost_usd !== undefined) {
+        totalCost.textContent = areaInfo.cost_usd.toFixed(0);
+    }
+    
+    // Calculate and update estimated processing time
+    if (estimatedTime && areaInfo.acres !== undefined) {
+        const estimatedMinutes = Math.max(1, Math.round(areaInfo.acres * 2.5));
+        estimatedTime.textContent = `${estimatedMinutes} minutes`;
+    }
+    
+    // Enable the start processing button
+    const startButton = document.getElementById('start-processing');
+    if (startButton) {
+        startButton.disabled = false;
+        startButton.textContent = 'Start Tree Detection';
+        console.log('Start processing button enabled');
+    }
+    
+    // Update header stats if elements exist
+    const headerArea = document.querySelector('.header-stats .stat:first-child .stat-value');
+    const headerCost = document.querySelector('.header-stats .stat:last-child .stat-value');
+    
+    if (headerArea && areaInfo.acres !== undefined) {
+        headerArea.textContent = `${areaInfo.acres.toFixed(1)} acres`;
+    }
+    
+    if (headerCost && areaInfo.cost_usd !== undefined) {
+        headerCost.textContent = `$${areaInfo.cost_usd.toFixed(0)}`;
+    }
+    
+    console.log('Area info UI updated successfully');
 }
 
 // ============================================================================

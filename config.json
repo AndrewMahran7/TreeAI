@@ -8,7 +8,7 @@
   "processing": {
     "cost_per_acre": 500,
     "target_resolution_mpp": 0.075,
-    "default_model": "model_55",
+    "default_model": "model_65",
     "max_area_acres": 1000,
     "imagery_months": [8, 9, 10],
     "imagery_years_back": 3,
@@ -16,29 +16,60 @@
     "job_timeout_minutes": 30
   },
   "models": {
-    "model_55": {
-      "filename": "model_epoch_55.ckpt",
-      "display_name": "Model 55 (Default)",
-      "description": "Best performing model from validation"
+    "model_5": {
+      "filename": "model_epoch_5.ckpt",
+      "display_name": "Model 5",
+      "description": "Early epoch model"
+    },
+    "model_15": {
+      "filename": "model_epoch_15.ckpt",
+      "display_name": "Model 15",
+      "description": "Low epoch model checkpoint"
+    },
+    "model_25": {
+      "filename": "model_epoch_25.ckpt",
+      "display_name": "Model 25",
+      "description": "Mid-range epoch model"
     },
     "model_50": {
       "filename": "model_epoch_50.ckpt", 
       "display_name": "Model 50",
       "description": "Alternative model checkpoint"
     },
+    "model_55": {
+      "filename": "model_epoch_55.ckpt",
+      "display_name": "Model 55",
+      "description": "Previous validation model"
+    },
     "model_60": {
       "filename": "model_epoch_60.ckpt",
       "display_name": "Model 60", 
       "description": "Higher epoch model"
+    },
+    "model_65": {
+      "filename": "model_epoch_65.ckpt",
+      "display_name": "Model 65 (Default)",
+      "description": "New default model - optimized performance"
+    },
+    "model_180": {
+      "filename": "model_epoch_180.ckpt",
+      "display_name": "Model 180",
+      "description": "High epoch model - advanced training"
     }
   },
   "default_settings": {
     "confidence_threshold": 0.25,
-    "iou_threshold": 0.7,
-    "containment_threshold": 0.75,
-    "patch_size": 1000,
-    "patch_overlap": 0.35,
-    "enable_postprocessing": true
+    "iou_threshold": 0.9,
+    "containment_threshold": 0.5,
+    "patch_size": 800,
+    "patch_overlap": 0.25,
+    "overlap_size": 200,
+    "enable_postprocessing": true,
+    "show_removed_boxes": false,
+    "enable_adaptive_confidence": true,
+    "adaptive_confidence_k": 2.0,
+    "iou_threshold_validation": 0.25,
+    "validation_method": "containment"
   },
   "paths": {
     "checkpoints_dir": "../checkpoints",
