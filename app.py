@@ -596,6 +596,66 @@ def get_available_dates():
     
     return jsonify(sorted(dates, key=lambda x: x['value'], reverse=True))
 
+@app.route('/api/geocode')
+def geocode_address():
+    """Geocode an address using Nominatim (OpenStreetMap)"""
+    query = request.args.get('query', '').strip()
+    
+    if not query:
+        return jsonify({'error': 'No query provided'}), 400
+    
+    try:
+        # Use Nominatim API for geocoding
+        import urllib.parse
+        import urllib.request
+        import json
+        
+        # URL encode the query
+        encoded_query = urllib.parse.quote(query)
+        
+        # Nominatim API endpoint
+        url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=5&addressdetails=1"
+        
+        # Add user agent as required by Nominatim
+        headers = {
+            'User-Agent': 'ArborNote Tree Detection App v3.0 (contact: support@arbornote.com)'
+        }
+        
+        request_obj = urllib.request.Request(url, headers=headers)
+        
+        with urllib.request.urlopen(request_obj, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        
+        # Process results
+        results = []
+        for item in data:
+            # Extract relevant information
+            result = {
+                'display_name': item.get('display_name', ''),
+                'lat': float(item.get('lat', 0)),
+                'lon': float(item.get('lon', 0)),
+                'type': item.get('type', ''),
+                'importance': item.get('importance', 0),
+                'address': item.get('address', {})
+            }
+            results.append(result)
+        
+        return jsonify({
+            'results': results,
+            'query': query,
+            'count': len(results)
+        })
+        
+    except urllib.error.HTTPError as e:
+        print(f"Geocoding HTTP error: {e}")
+        return jsonify({'error': 'Geocoding service unavailable'}), 503
+    except urllib.error.URLError as e:
+        print(f"Geocoding URL error: {e}")
+        return jsonify({'error': 'Network error occurred'}), 503
+    except Exception as e:
+        print(f"Geocoding error: {e}")
+        return jsonify({'error': 'Failed to geocode address'}), 500
+
 @app.route('/api/upload-kml', methods=['POST'])
 def upload_kml():
     """Upload and parse KML file to extract geofence coordinates"""
@@ -915,11 +975,25 @@ def calculate_area_and_cost(geofence_coords):
         
         # Debug: Show coordinate bounds
         if geofence_coords:
-            lats = [coord[0] for coord in geofence_coords]
-            lons = [coord[1] for coord in geofence_coords]
+            # FIXED: Properly extract lat/lon values
+            lats = [coord[0] for coord in geofence_coords]  # coord[0] should be lat
+            lons = [coord[1] for coord in geofence_coords]  # coord[1] should be lon
             
             min_lat, max_lat = min(lats), max(lats)
             min_lon, max_lon = min(lons), max(lons)
+            
+            # VALIDATION: Check if coordinates make sense
+            if abs(min_lat) > 90 or abs(max_lat) > 90:
+                print(f"   ⚠️  Latitude values out of range, coordinates appear to be swapped!")
+                print(f"   🔄 Swapping coordinate order from [coord[0], coord[1]] to [coord[1], coord[0]]")
+                # Swap the coordinates
+                geofence_coords = [[coord[1], coord[0]] for coord in geofence_coords]
+                
+                # Re-extract after swapping
+                lats = [coord[0] for coord in geofence_coords]
+                lons = [coord[1] for coord in geofence_coords]
+                min_lat, max_lat = min(lats), max(lats)
+                min_lon, max_lon = min(lons), max(lons)
             
             print(f"   📍 Latitude range: {min_lat:.8f} to {max_lat:.8f} (span: {max_lat-min_lat:.8f}°)")
             print(f"   📍 Longitude range: {min_lon:.8f} to {max_lon:.8f} (span: {max_lon-min_lon:.8f}°)")
@@ -929,13 +1003,14 @@ def calculate_area_and_cost(geofence_coords):
             avg_lat = (min_lat + max_lat) / 2
             lon_km = (max_lon - min_lon) * 111.32 * abs(safe_cos(safe_radians(avg_lat)))
             
-            print(f"   📏 Approximate bounds: {lat_km:.0f}m x {lon_km:.0f}m")
+            print(f"   📏 Approximate bounds: {lat_km*1000:.0f}m x {lon_km*1000:.0f}m")
         
         if HAS_GEO:
             # Use accurate projection-based calculation
             transformer = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
             
-            # Note: geofence_coords are in [lat, lon] format, but transformer expects [lon, lat]
+            # Note: geofence_coords are now validated to be in [lat, lon] format
+            # transformer expects [lon, lat], so we need to swap
             projected_coords = [transformer.transform(coord[1], coord[0]) for coord in geofence_coords]
             
             polygon = Polygon(projected_coords)
@@ -950,13 +1025,12 @@ def calculate_area_and_cost(geofence_coords):
             area = 0.0
             for i in range(n):
                 j = (i + 1) % n
-                # geofence_coords are [lat, lon], so swap for calculation
+                # geofence_coords are [lat, lon], so swap for calculation [lon, lat]
                 area += geofence_coords[i][1] * geofence_coords[j][0]
                 area -= geofence_coords[j][1] * geofence_coords[i][0]
             area = abs(area) / 2.0
             
             # Rough conversion from decimal degrees to square meters (very approximate!)
-            # This is only for demo purposes - real deployment should use proper projections
             lat_avg = sum(coord[0] for coord in geofence_coords) / len(geofence_coords)
             meters_per_degree = 111320 * abs(safe_cos(safe_radians(lat_avg)))
             area_sq_meters = area * (meters_per_degree ** 2)
@@ -966,9 +1040,12 @@ def calculate_area_and_cost(geofence_coords):
         cost = area_acres * 500  # $500 per acre
         
         # Ensure we don't return NaN or infinite values
-        area_acres = 0.0 if not (area_acres > 0) else area_acres
-        area_sq_meters = 0.0 if not (area_sq_meters > 0) else area_sq_meters
-        cost = 0.0 if not (cost > 0) else cost
+        if not (area_acres > 0):  # This catches NaN, infinity, and negative values
+            area_acres = 0.0
+        if not (area_sq_meters > 0):
+            area_sq_meters = 0.0
+        if not (cost > 0):
+            cost = 0.0
         
         result = {
             'acres': round(area_acres, 3),
@@ -981,6 +1058,7 @@ def calculate_area_and_cost(geofence_coords):
         
     except Exception as e:
         print(f"❌ Error calculating area: {e}")
+        print(f"❌ Traceback: {traceback.format_exc()}")
         # Return safe default values instead of NaN
         return {
             'acres': 0.0,
@@ -991,7 +1069,7 @@ def calculate_area_and_cost(geofence_coords):
 def estimate_processing_time(acres):
     """Estimate processing time based on area"""
     # Rough estimates: ~2-3 minutes per acre
-    base_time = acres * 2.5
+    base_time = acres * 0.1 + 1
     return max(1, round(base_time))
 
 def process_job_async(job_id):
@@ -1040,9 +1118,373 @@ def update_job_progress(job_id, status, progress, message):
                 'message': message
             })
 
+def split_large_geofence(geofence_coords, max_area_sq_km):
+    """Split large geofence into smaller tiles that fit within Nearmap limits"""
+    if not HAS_GEO:
+        return split_geofence_simple(geofence_coords, max_area_sq_km)
+    
+    from shapely.geometry import Polygon
+    from shapely.ops import transform
+    import pyproj
+    
+    print(f"🧩 SPLITTING LARGE GEOFENCE")
+    print(f"   Max area per tile: {max_area_sq_km} sq km")
+    
+    # Create polygon from coordinates
+    polygon = Polygon(geofence_coords)
+    
+    # Calculate bounds
+    min_lon, min_lat, max_lon, max_lat = polygon.bounds
+    
+    # Estimate grid size needed
+    total_area_sq_m = polygon.area * (111320 ** 2) * abs(math.cos(math.radians((min_lat + max_lat) / 2)))
+    total_area_sq_km = total_area_sq_m / 1_000_000
+    
+    # Calculate grid dimensions
+    tiles_needed = math.ceil(total_area_sq_km / max_area_sq_km)
+    grid_size = math.ceil(math.sqrt(tiles_needed))
+    
+    print(f"   Total area: {total_area_sq_km:.2f} sq km")
+    print(f"   Estimated tiles needed: {tiles_needed}")
+    print(f"   Grid size: {grid_size}x{grid_size}")
+    
+    # Create grid tiles
+    lon_step = (max_lon - min_lon) / grid_size
+    lat_step = (max_lat - min_lat) / grid_size
+    
+    tiles = []
+    
+    for i in range(grid_size):
+        for j in range(grid_size):
+            # Create tile bounds
+            tile_min_lon = min_lon + j * lon_step
+            tile_max_lon = min_lon + (j + 1) * lon_step
+            tile_min_lat = min_lat + i * lat_step
+            tile_max_lat = min_lat + (i + 1) * lat_step
+            
+            # Create tile polygon
+            tile_coords = [
+                [tile_min_lat, tile_min_lon],
+                [tile_min_lat, tile_max_lon],
+                [tile_max_lat, tile_max_lon],
+                [tile_max_lat, tile_min_lon],
+                [tile_min_lat, tile_min_lon]
+            ]
+            
+            tile_polygon = Polygon([(coord[1], coord[0]) for coord in tile_coords])  # lon, lat for Shapely
+            
+            # Check if tile intersects with original geofence
+            if tile_polygon.intersects(polygon):
+                # Get intersection
+                intersection = tile_polygon.intersection(polygon)
+                
+                if intersection.area > 0:
+                    # Convert back to [lat, lon] format
+                    if hasattr(intersection, 'exterior'):
+                        coords = [[lat, lon] for lon, lat in intersection.exterior.coords]
+                        tiles.append({
+                            'coordinates': coords,
+                            'tile_id': f"tile_{i}_{j}",
+                            'bounds': {
+                                'min_lat': tile_min_lat,
+                                'max_lat': tile_max_lat,
+                                'min_lon': tile_min_lon,
+                                'max_lon': tile_max_lon
+                            }
+                        })
+    
+    print(f"   ✅ Created {len(tiles)} tiles that intersect with geofence")
+    return tiles
+
+def split_geofence_simple(geofence_coords, max_area_sq_km):
+    """Simple geofence splitting without Shapely (fallback)"""
+    print(f"🧩 SIMPLE GEOFENCE SPLITTING (no Shapely)")
+    
+    # Get bounding box
+    lats = [coord[0] for coord in geofence_coords]
+    lons = [coord[1] for coord in geofence_coords]
+    
+    min_lat, max_lat = min(lats), max(lats)
+    min_lon, max_lon = min(lons), max(lons)
+    
+    # Estimate area and grid size
+    lat_range = max_lat - min_lat
+    lon_range = max_lon - min_lon
+    
+    # Rough area calculation
+    approx_area_sq_km = lat_range * lon_range * 111.32 * 111.32 * abs(safe_cos(safe_radians((min_lat + max_lat) / 2))) / 1_000_000
+    
+    tiles_needed = math.ceil(approx_area_sq_km / max_area_sq_km)
+    grid_size = math.ceil(math.sqrt(tiles_needed))
+    
+    print(f"   Estimated area: {approx_area_sq_km:.2f} sq km")
+    print(f"   Grid size: {grid_size}x{grid_size}")
+    
+    # Create simple grid tiles
+    lat_step = lat_range / grid_size
+    lon_step = lon_range / grid_size
+    
+    tiles = []
+    
+    for i in range(grid_size):
+        for j in range(grid_size):
+            tile_min_lat = min_lat + i * lat_step
+            tile_max_lat = min_lat + (i + 1) * lat_step
+            tile_min_lon = min_lon + j * lon_step
+            tile_max_lon = min_lon + (j + 1) * lon_step
+            
+            # Create simple rectangular tile
+            tile_coords = [
+                [tile_min_lat, tile_min_lon],
+                [tile_min_lat, tile_max_lon],
+                [tile_max_lat, tile_max_lon],
+                [tile_max_lat, tile_min_lon],
+                [tile_min_lat, tile_min_lon]
+            ]
+            
+            tiles.append({
+                'coordinates': tile_coords,
+                'tile_id': f"tile_{i}_{j}",
+                'bounds': {
+                    'min_lat': tile_min_lat,
+                    'max_lat': tile_max_lat,
+                    'min_lon': tile_min_lon,
+                    'max_lon': tile_max_lon
+                }
+            })
+    
+    print(f"   ✅ Created {len(tiles)} rectangular tiles")
+    return tiles
+
+def extract_nearmap_with_splitting(job, max_area_sq_km):
+    """Extract Nearmap imagery by splitting large areas into tiles"""
+    print(f"🧩 LARGE AREA EXTRACTION - SPLITTING APPROACH")
+    
+    # Split the geofence
+    tiles = split_large_geofence(job['geofence'], max_area_sq_km)
+    
+    if not tiles:
+        raise ValueError("Could not split geofence into tiles")
+    
+    job_temp_dir = os.path.join('temp_files', job['id'])
+    os.makedirs(job_temp_dir, exist_ok=True)
+    
+    # Extract each tile
+    tile_images = []
+    total_tiles = len(tiles)
+    
+    for i, tile in enumerate(tiles):
+        print(f"\n📥 Extracting tile {i+1}/{total_tiles}: {tile['tile_id']}")
+        
+        try:
+            # Create KML for this tile
+            tile_kml_path = os.path.join(job_temp_dir, f"{tile['tile_id']}.kml")
+            create_kml_from_geofence(tile['coordinates'], tile_kml_path)
+            
+            # Extract this tile
+            tile_result = extract_single_tile(job, tile, tile_kml_path, job_temp_dir)
+            
+            if tile_result['success']:
+                tile_images.append(tile_result)
+                print(f"   ✅ Tile {tile['tile_id']} extracted successfully")
+            else:
+                print(f"   ❌ Tile {tile['tile_id']} failed: {tile_result.get('error', 'Unknown error')}")
+                
+        except Exception as e:
+            print(f"   ❌ Error extracting tile {tile['tile_id']}: {e}")
+            continue
+    
+    if not tile_images:
+        raise ValueError("No tiles were extracted successfully")
+    
+    print(f"\n🔧 Successfully extracted {len(tile_images)}/{total_tiles} tiles")
+    
+    # Merge the tiles
+    print(f"🧩 Merging {len(tile_images)} tiles into final image...")
+    merged_result = merge_tile_images(tile_images, job, job_temp_dir)
+    
+    # Clean up individual tile files
+    print(f"🧹 Cleaning up individual tile files...")
+    for tile_result in tile_images:
+        try:
+            if os.path.exists(tile_result['image_path']):
+                os.remove(tile_result['image_path'])
+            if os.path.exists(tile_result['metadata_path']):
+                os.remove(tile_result['metadata_path'])
+        except:
+            pass
+    
+    return merged_result
+
+def extract_single_tile(job, tile, kml_path, output_dir):
+    """Extract a single tile using Nearmap API"""
+    try:
+        from label_process.extract_nearmap import NearmapTileExtractor
+        
+        extractor = NearmapTileExtractor(
+            api_key=os.getenv('NEARMAP_API_KEY'),
+            target_mpp=job['settings'].get('target_mpp', 0.075)
+        )
+        
+        # Extract this tile
+        location_name = f"job_{job['id'][:8]}_{tile['tile_id']}"
+        
+        imagery_date = job.get('imagery_date')
+        
+        results = extractor.extract_region(
+            kml_path=kml_path,
+            date=imagery_date,
+            output_dir=output_dir,
+            location_name=location_name
+        )
+        
+        return {
+            'success': True,
+            'tile_id': tile['tile_id'],
+            'image_path': results['image_path'],
+            'metadata_path': results['metadata_path'],
+            'bounds': tile['bounds'],
+            'coordinates': tile['coordinates']
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'tile_id': tile['tile_id'],
+            'error': str(e)
+        }
+
+def merge_tile_images(tile_images, job, output_dir):
+    """Merge multiple tile images into a single image"""
+    if not HAS_PIL:
+        raise ValueError("PIL required for image merging")
+    
+    print(f"🖼️  MERGING {len(tile_images)} TILE IMAGES")
+    
+    # Calculate overall bounds
+    all_bounds = [tile['bounds'] for tile in tile_images]
+    
+    min_lat = min(bounds['min_lat'] for bounds in all_bounds)
+    max_lat = max(bounds['max_lat'] for bounds in all_bounds)
+    min_lon = min(bounds['min_lon'] for bounds in all_bounds)
+    max_lon = max(bounds['max_lon'] for bounds in all_bounds)
+    
+    print(f"   📍 Overall bounds: {min_lat:.6f},{min_lon:.6f} to {max_lat:.6f},{max_lon:.6f}")
+    
+    # Load first image to get resolution info
+    first_metadata_path = tile_images[0]['metadata_path']
+    with open(first_metadata_path, 'r') as f:
+        first_metadata = json.load(f)
+    
+    resolution_mpp = first_metadata.get('resolution_mpp', 0.075)
+    
+    # Calculate total image dimensions
+    lat_range = max_lat - min_lat
+    lon_range = max_lon - min_lon
+    
+    # Convert to meters and then to pixels
+    lat_meters = lat_range * 111320
+    lon_meters = lon_range * 111320 * abs(safe_cos(safe_radians((min_lat + max_lat) / 2)))
+    
+    total_width = int(lon_meters / resolution_mpp)
+    total_height = int(lat_meters / resolution_mpp)
+    
+    print(f"   📐 Final image dimensions: {total_width}x{total_height} pixels")
+    print(f"   📏 Resolution: {resolution_mpp} m/px")
+    
+    # Create merged image
+    merged_image = Image.new('RGB', (total_width, total_height), (0, 0, 0))
+    
+    # Paste each tile at correct position
+    for tile in tile_images:
+        print(f"   🧩 Pasting tile {tile['tile_id']}...")
+        
+        try:
+            # Load tile image
+            tile_image = Image.open(tile['image_path'])
+            
+            # Calculate paste position
+            tile_bounds = tile['bounds']
+            
+            # Position relative to overall bounds
+            x_offset = int((tile_bounds['min_lon'] - min_lon) / lon_range * total_width)
+            y_offset = int((max_lat - tile_bounds['max_lat']) / lat_range * total_height)
+            
+            print(f"      Position: ({x_offset}, {y_offset})")
+            
+            # Paste tile
+            merged_image.paste(tile_image, (x_offset, y_offset))
+            tile_image.close()
+            
+        except Exception as e:
+            print(f"      ❌ Error pasting tile {tile['tile_id']}: {e}")
+            continue
+    
+    # Save merged image
+    location_name = f"job_{job['id'][:8]}"
+    merged_image_path = os.path.join(output_dir, f"{location_name}_merged.jpg")
+    merged_image.save(merged_image_path, 'JPEG', quality=95)
+    merged_image.close()
+    
+    print(f"   ✅ Merged image saved: {merged_image_path}")
+    
+    # Create merged metadata
+    merged_metadata = {
+        'file': f"{location_name}_merged.jpg",
+        'resolution_mpp': resolution_mpp,
+        'width_px': total_width,
+        'height_px': total_height,
+        'bounds': {
+            'min_lat': min_lat,
+            'max_lat': max_lat,
+            'min_lon': min_lon,
+            'max_lon': max_lon
+        },
+        'extraction_info': {
+            'method': 'tile_splitting_and_merging',
+            'total_tiles': len(tile_images),
+            'extracted_date': datetime.now().isoformat(),
+            'tile_details': [
+                {
+                    'tile_id': tile['tile_id'],
+                    'bounds': tile['bounds']
+                }
+                for tile in tile_images
+            ]
+        }
+    }
+    
+    merged_metadata_path = os.path.join(output_dir, f"{location_name}_merged_metadata.json")
+    with open(merged_metadata_path, 'w') as f:
+        json.dump(merged_metadata, f, indent=2)
+    
+    print(f"   💾 Merged metadata saved: {merged_metadata_path}")
+    
+    # Update job files
+    job['files']['raw_image'] = merged_image_path
+    job['files']['metadata'] = merged_metadata_path
+    
+    print(f"✅ Tile merging completed successfully")
+    
+    return True
+
 def extract_nearmap_step(job):
-    """Step 1: Extract Nearmap imagery"""
+    """Step 1: Extract Nearmap imagery with area validation and splitting"""
     import time
+    
+    # Check area size first and split if necessary
+    area_info = job['area_info']
+    area_sq_km = area_info['square_meters'] / 1_000_000
+    
+    # Nearmap area limits (adjust based on your subscription)
+    MAX_AREA_SQ_KM = 25  # Conservative limit - adjust based on your plan
+    
+    print(f"📍 Processing area: {area_sq_km:.2f} sq km")
+    
+    if area_sq_km > MAX_AREA_SQ_KM:
+        print(f"⚠️  Area too large: {area_sq_km:.2f} sq km (max: {MAX_AREA_SQ_KM} sq km)")
+        print(f"🧩 Splitting into smaller tiles for processing...")
+        return extract_nearmap_with_splitting(job, MAX_AREA_SQ_KM)
     
     if not HAS_NEARMAP or FORCE_SIMULATION_MODE:
         # Simulation mode - create mock imagery data
@@ -2149,13 +2591,14 @@ def generate_kml_file(job, output_path):
             <coordinates>
 '''
     
-    # Add coordinates
-    for lon, lat in geofence_coords:
+    # Add coordinates - KML format requires longitude,latitude,altitude
+    # geofence_coords are stored as [lat, lon] pairs, so we need to swap them
+    for lat, lon in geofence_coords:
         kml_content += f"              {lon},{lat},0\n"
     
     # Close first coordinate to complete polygon
     if geofence_coords:
-        first_lon, first_lat = geofence_coords[0]
+        first_lat, first_lon = geofence_coords[0]
         kml_content += f"              {first_lon},{first_lat},0\n"
     
     kml_content += '''            </coordinates>

@@ -116,6 +116,9 @@ function initializeUI() {
     
     // Download button
     document.getElementById('download-all').addEventListener('click', downloadAllFiles);
+    
+    // Address search functionality
+    initializeAddressSearch();
 }
 
 function initializeWebSocket() {
@@ -182,6 +185,229 @@ function populateDateSelect(dates) {
         option.textContent = date.label;
         select.appendChild(option);
     });
+}
+
+// ============================================================================
+// ADDRESS SEARCH FUNCTIONALITY
+// ============================================================================
+
+let searchTimeout = null;
+let currentSearchMarker = null;
+
+function initializeAddressSearch() {
+    const searchInput = document.getElementById('address-search');
+    const searchButton = document.getElementById('search-button');
+    const searchResults = document.getElementById('search-results');
+    
+    // Search input event listeners
+    searchInput.addEventListener('input', function() {
+        const query = this.value.trim();
+        
+        // Clear previous timeout
+        if (searchTimeout) {
+            clearTimeout(searchTimeout);
+        }
+        
+        if (query.length < 3) {
+            hideSearchResults();
+            return;
+        }
+        
+        // Debounce search requests
+        searchTimeout = setTimeout(() => {
+            performAddressSearch(query);
+        }, 300);
+    });
+    
+    // Handle Enter key
+    searchInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            const query = this.value.trim();
+            if (query.length >= 3) {
+                performAddressSearch(query);
+            }
+        }
+        
+        // Handle arrow key navigation
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            navigateSearchResults('down');
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            navigateSearchResults('up');
+        } else if (e.key === 'Escape') {
+            hideSearchResults();
+            this.blur();
+        }
+    });
+    
+    // Search button click
+    searchButton.addEventListener('click', function() {
+        const query = searchInput.value.trim();
+        if (query.length >= 3) {
+            performAddressSearch(query);
+        }
+    });
+    
+    // Hide results when clicking outside
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('.map-search')) {
+            hideSearchResults();
+        }
+    });
+}
+
+async function performAddressSearch(query) {
+    const searchResults = document.getElementById('search-results');
+    
+    try {
+        // Show loading state
+        showSearchResults();
+        searchResults.innerHTML = '<div class="search-loading"><i class="fas fa-spinner fa-spin"></i> Searching...</div>';
+        
+        // Make API request
+        const response = await fetch(`/api/geocode?query=${encodeURIComponent(query)}`);
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(data.error || 'Search failed');
+        }
+        
+        displaySearchResults(data.results);
+        
+    } catch (error) {
+        console.error('Search error:', error);
+        searchResults.innerHTML = '<div class="search-no-results"><i class="fas fa-exclamation-triangle"></i> Search failed. Please try again.</div>';
+    }
+}
+
+function displaySearchResults(results) {
+    const searchResults = document.getElementById('search-results');
+    
+    if (results.length === 0) {
+        searchResults.innerHTML = '<div class="search-no-results"><i class="fas fa-map-marker-alt"></i> No locations found</div>';
+        return;
+    }
+    
+    let html = '';
+    results.forEach((result, index) => {
+        const title = getLocationTitle(result);
+        const subtitle = result.display_name;
+        
+        html += `
+            <div class="search-result-item" data-index="${index}" data-lat="${result.lat}" data-lon="${result.lon}">
+                <div class="search-result-title">${escapeHtml(title)}</div>
+                <div class="search-result-subtitle">${escapeHtml(subtitle)}</div>
+            </div>
+        `;
+    });
+    
+    searchResults.innerHTML = html;
+    
+    // Add click listeners
+    searchResults.querySelectorAll('.search-result-item').forEach(item => {
+        item.addEventListener('click', function() {
+            const lat = parseFloat(this.dataset.lat);
+            const lon = parseFloat(this.dataset.lon);
+            const title = this.querySelector('.search-result-title').textContent;
+            
+            selectSearchResult(lat, lon, title);
+        });
+    });
+}
+
+function getLocationTitle(result) {
+    // Extract a meaningful title from the address components
+    const address = result.address || {};
+    
+    // Priority order for title
+    const titleOptions = [
+        address.house_number && address.road ? `${address.house_number} ${address.road}` : null,
+        address.road,
+        address.neighbourhood,
+        address.suburb,
+        address.city || address.town || address.village,
+        address.county,
+        address.state,
+        result.display_name.split(',')[0]
+    ];
+    
+    for (const option of titleOptions) {
+        if (option && option.trim()) {
+            return option.trim();
+        }
+    }
+    
+    return 'Location';
+}
+
+function selectSearchResult(lat, lon, title) {
+    // Center map on selected location
+    map.setView([lat, lon], 16);
+    
+    // Remove previous search marker
+    if (currentSearchMarker) {
+        map.removeLayer(currentSearchMarker);
+    }
+    
+    // Add new marker
+    currentSearchMarker = L.marker([lat, lon], {
+        icon: L.divIcon({
+            className: 'search-marker',
+            html: '<i class="fas fa-map-marker-alt" style="color: #e74c3c; font-size: 20px;"></i>',
+            iconSize: [20, 20],
+            iconAnchor: [10, 20]
+        })
+    }).addTo(map);
+    
+    currentSearchMarker.bindPopup(`<strong>Search Result</strong><br>${escapeHtml(title)}`).openPopup();
+    
+    // Hide search results
+    hideSearchResults();
+    
+    // Clear search input
+    document.getElementById('address-search').value = title;
+    
+    console.log(`Navigated to: ${title} (${lat}, ${lon})`);
+}
+
+function navigateSearchResults(direction) {
+    const items = document.querySelectorAll('.search-result-item');
+    if (items.length === 0) return;
+    
+    const currentActive = document.querySelector('.search-result-item.active');
+    let newIndex = 0;
+    
+    if (currentActive) {
+        currentActive.classList.remove('active');
+        const currentIndex = parseInt(currentActive.dataset.index);
+        
+        if (direction === 'down') {
+            newIndex = currentIndex + 1;
+            if (newIndex >= items.length) newIndex = 0;
+        } else {
+            newIndex = currentIndex - 1;
+            if (newIndex < 0) newIndex = items.length - 1;
+        }
+    }
+    
+    items[newIndex].classList.add('active');
+    items[newIndex].scrollIntoView({ block: 'nearest' });
+}
+
+function showSearchResults() {
+    document.getElementById('search-results').style.display = 'block';
+}
+
+function hideSearchResults() {
+    document.getElementById('search-results').style.display = 'none';
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 // ============================================================================

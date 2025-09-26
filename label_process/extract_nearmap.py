@@ -55,7 +55,7 @@ class NearmapImageExtractor:
         # Seasonal preferences (from working script)
         self.prioritize_fall_imagery = True
         self.preferred_months = [8, 9, 10]  # August, September, October
-        self.preferred_year = 2024
+        self.preferred_year = 2025
         self.fallback_to_recent = True
         self.max_surveys_to_check = 50
         

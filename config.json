@@ -10,7 +10,7 @@
     "target_resolution_mpp": 0.075,
     "default_model": "model_65",
     "max_area_acres": 1000,
-    "imagery_months": [8, 9, 10],
+    "imagery_months": [7, 8, 9],
     "imagery_years_back": 3,
     "max_concurrent_jobs": 3,
     "job_timeout_minutes": 30
