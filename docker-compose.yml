@@ -2,44 +2,71 @@ version: '3.8'
 
 services:
   arbornote:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "4000:4000"
     environment:
       - FLASK_ENV=production
-      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY}
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-changeme-use-env-file}
       - NEARMAP_API_KEY=${NEARMAP_API_KEY}
-      - MAX_CONCURRENT_JOBS=3
-      - JOB_TIMEOUT_MINUTES=30
+      - MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS:-3}
+      - JOB_TIMEOUT_MINUTES=${JOB_TIMEOUT_MINUTES:-30}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATABASE_URL=${DATABASE_URL}
     volumes:
       # Model checkpoints (mount your model directory)
       - ./checkpoints:/app/checkpoints:ro
       # Persistent storage for logs
       - arbornote_logs:/app/logs
-      # Persistent storage for outputs
+      # Persistent storage for outputs  
       - arbornote_outputs:/app/outputs
-      # Temporary files (can be cleaned up)
+      # Temporary files (cleaned up periodically)
       - arbornote_temp:/app/temp_files
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
 
-  # Optional: Nginx reverse proxy for production
+  # Nginx reverse proxy with SSL termination
   nginx:
     image: nginx:alpine
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/nginx/ssl:ro  # Mount SSL certificates
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - arbornote_logs:/var/log/nginx
     depends_on:
       - arbornote
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     profiles:
       - with-proxy
 

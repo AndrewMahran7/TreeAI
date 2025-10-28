@@ -1,4 +1,21 @@
-# Use Python 3.10 slim image for smaller size
+# Multi-stage build for production
+FROM python:3.10-slim as builder
+
+# Set working directory
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.prod.txt requirements.txt ./
+RUN pip install --no-cache-dir --user -r requirements.prod.txt
+
+# Production stage
 FROM python:3.10-slim
 
 # Set working directory
@@ -8,10 +25,10 @@ WORKDIR /app
 ENV PYTHONPATH=/app
 ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
+ENV PATH=/home/arbornote/.local/bin:$PATH
 
-# Install system dependencies
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y \
-    build-essential \
     curl \
     libglib2.0-0 \
     libsm6 \
@@ -19,35 +36,47 @@ RUN apt-get update && apt-get install -y \
     libxrender-dev \
     libgomp1 \
     libgdal-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get autoremove -y \
+    && apt-get clean
 
-# Copy requirements first for better layer caching
-COPY requirements.txt .
+# Create non-root user first
+RUN useradd --create-home --shell /bin/bash --uid 1000 arbornote
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy Python packages from builder
+COPY --from=builder /root/.local /home/arbornote/.local
 
 # Copy application code
-COPY . .
+COPY --chown=arbornote:arbornote . .
 
-# Create necessary directories
-RUN mkdir -p logs temp_files outputs checkpoints
+# Create necessary directories with proper permissions
+RUN mkdir -p logs temp_files outputs checkpoints static/uploads \
+    && chown -R arbornote:arbornote logs temp_files outputs checkpoints static \
+    && chmod 755 logs temp_files outputs checkpoints static \
+    && chmod +x *.sh 2>/dev/null || true
 
-# Set file permissions
-RUN chmod +x start_production.sh || true
-RUN chmod 755 logs temp_files outputs
-
-# Create non-root user for security
-RUN useradd --create-home --shell /bin/bash arbornote
-RUN chown -R arbornote:arbornote /app
+# Switch to non-root user
 USER arbornote
 
 # Expose port
 EXPOSE 4000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=30s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:4000/health || exit 1
 
-# Start command
-CMD ["gunicorn", "--bind", "0.0.0.0:4000", "--workers", "4", "--worker-class", "gevent", "--timeout", "300", "--access-logfile", "logs/access.log", "--error-logfile", "logs/error.log", "app:app"]
+# Start command with production optimizations
+CMD ["gunicorn", \
+     "--bind", "0.0.0.0:4000", \
+     "--workers", "4", \
+     "--worker-class", "gevent", \
+     "--worker-connections", "1000", \
+     "--timeout", "300", \
+     "--keep-alive", "30", \
+     "--max-requests", "1000", \
+     "--max-requests-jitter", "50", \
+     "--preload", \
+     "--access-logfile", "logs/access.log", \
+     "--error-logfile", "logs/error.log", \
+     "--log-level", "info", \
+     "app:app"]

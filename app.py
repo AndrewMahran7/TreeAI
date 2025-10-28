@@ -58,9 +58,9 @@ except ImportError:
     print("Warning: numpy not available. Using Python random for simulations.")
     HAS_NUMPY = False
 
-# Always import standard library modules for fallbacks
-import random
+# Standard library modules
 import math
+import random
 import sys
 import os
 import json
@@ -72,6 +72,9 @@ import tempfile
 import zipfile
 import shutil
 import csv
+import xml.etree.ElementTree as ET
+import urllib.parse
+import urllib.request
 
 # Utility functions for numpy fallbacks
 def safe_random_uniform(low, high):
@@ -121,7 +124,7 @@ except ImportError:
     HAS_GEO = False
 
 # Import your existing modules (adjust paths as needed)
-import sys
+# sys already imported above
 sys.path.append('..')
 
 # Graceful imports for production - handle missing dependencies
@@ -171,13 +174,61 @@ except ImportError as e:
     HAS_PRODUCTION_PIPELINE = False
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'arbornote-secret-key-2025'
+
+# Enhanced security configuration
+app.config.update({
+    'SECRET_KEY': os.getenv('SECRET_KEY', 'arbornote-secret-key-2025'),
+    'MAX_CONTENT_LENGTH': 50 * 1024 * 1024,  # 50MB max file size
+    'PERMANENT_SESSION_LIFETIME': timedelta(hours=2),
+    'SESSION_COOKIE_SECURE': os.getenv('FLASK_ENV') == 'production',
+    'SESSION_COOKIE_HTTPONLY': True,
+    'SESSION_COOKIE_SAMESITE': 'Lax',
+})
 
 # Initialize SocketIO only if available
 if HAS_SOCKETIO:
-    socketio = SocketIO(app, cors_allowed_origins="*")
+    socketio = SocketIO(app, cors_allowed_origins="*", 
+                       logger=False, engineio_logger=False)  # Reduce noise in production
 else:
     socketio = None
+
+# Set up logging
+import logging
+from logging.handlers import RotatingFileHandler
+
+def setup_logging():
+    """Configure production logging"""
+    # Create logs directory if it doesn't exist
+    logs_dir = Path('logs')
+    logs_dir.mkdir(exist_ok=True)
+    
+    # Set logging level based on environment
+    log_level = logging.DEBUG if os.getenv('FLASK_ENV') == 'development' else logging.INFO
+    
+    # Configure root logger
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            RotatingFileHandler(
+                logs_dir / 'arbornote.log', 
+                maxBytes=10*1024*1024,  # 10MB
+                backupCount=5
+            ),
+            logging.StreamHandler()  # Console output
+        ]
+    )
+    
+    # Create app logger
+    app.logger.setLevel(log_level)
+    
+    # Suppress verbose third-party logs in production
+    if os.getenv('FLASK_ENV') == 'production':
+        logging.getLogger('werkzeug').setLevel(logging.WARNING)
+        logging.getLogger('urllib3').setLevel(logging.WARNING)
+        logging.getLogger('requests').setLevel(logging.WARNING)
+
+setup_logging()
 
 # Load configuration
 def load_config():
@@ -199,16 +250,15 @@ CHECKPOINTS_ALT_DIR = config.get('paths', {}).get('checkpoints_alt_dir', './chec
 FORCE_SIMULATION_MODE = False  # Real Nearmap extraction enabled
 FORCE_SKIP_DEPENDENCIES = True  # Skip problematic dependencies
 
-AVAILABLE_MODELS = {
-    'model_5' : 'model_epoch_5.ckpt',
-    'model_15': 'model_epoch_15.ckpt',
-    'model_25': 'model_epoch_25.ckpt',
-    'model_35': 'model_epoch_35.ckpt',
-    'model_45': 'model_epoch_45.ckpt',
-    'model_55': 'model_epoch_55.ckpt',
-    'model_65': 'model_epoch_65.ckpt',  # New default
-    'model_180': 'model_epoch_180.ckpt',
-}
+# Load models from config
+def load_available_models():
+    models = {}
+    config_models = config.get('models', {})
+    for model_key, model_info in config_models.items():
+        models[model_key] = model_info['filename']
+    return models
+
+AVAILABLE_MODELS = load_available_models()
 
 DEFAULT_SETTINGS = config.get('default_settings', {
     'confidence_threshold': 0.25,
@@ -304,22 +354,38 @@ def create_visualization_image(predictions, geofence, output_path, area_acres, p
         
         # Draw predictions with OpenCV (similar to validate_model.py)
         for i, pred in enumerate(predictions):
-            # Map lat/lon to pixel coordinates
-            # For now, use simple mapping - in a real implementation, you'd use the image metadata
+            # Use pixel coordinates from bounding box data
             if 'bbox_pixels' in pred:
                 # Use pixel coordinates if available
                 x1 = int(pred['bbox_pixels']['xmin'])
                 y1 = int(pred['bbox_pixels']['ymin']) 
                 x2 = int(pred['bbox_pixels']['xmax'])
                 y2 = int(pred['bbox_pixels']['ymax'])
+                print(f"   Drawing box {i+1}: ({x1},{y1}) to ({x2},{y2}) conf={pred.get('confidence', 0):.2f}") if i < 5 else None
+            elif 'bbox' in pred:
+                # Try alternative bbox format
+                bbox = pred['bbox']
+                x1 = int(bbox.get('xmin', bbox.get('x1', 0)))
+                y1 = int(bbox.get('ymin', bbox.get('y1', 0)))
+                x2 = int(bbox.get('xmax', bbox.get('x2', 50)))
+                y2 = int(bbox.get('ymax', bbox.get('y2', 50)))
+                print(f"   Drawing bbox box {i+1}: ({x1},{y1}) to ({x2},{y2}) conf={pred.get('confidence', 0):.2f}") if i < 5 else None
+            elif 'pixel_x' in pred and 'pixel_y' in pred:
+                # Use center pixel coordinates with default size
+                center_x = int(pred['pixel_x'])
+                center_y = int(pred['pixel_y'])
+                bbox_size = 20  # Default box size for center points
+                x1, y1 = center_x - bbox_size, center_y - bbox_size
+                x2, y2 = center_x + bbox_size, center_y + bbox_size
+                print(f"   Drawing center box {i+1}: ({x1},{y1}) to ({x2},{y2}) conf={pred.get('confidence', 0):.2f}") if i < 5 else None
             else:
-                # Map from lat/lon to approximate pixel position
-                # This is a simple mapping - real implementation would use image metadata
+                # Fallback: Map from lat/lon to approximate pixel position
                 center_x = int((pred.get('longitude', 0) + 180) / 360 * img_width)
                 center_y = int((90 - pred.get('latitude', 0)) / 180 * img_height)
                 bbox_size = 15  # Default box size
                 x1, y1 = center_x - bbox_size, center_y - bbox_size
                 x2, y2 = center_x + bbox_size, center_y + bbox_size
+                print(f"   Drawing fallback box {i+1}: ({x1},{y1}) to ({x2},{y2})") if i < 5 else None
             
             # Ensure coordinates are within image bounds
             x1 = max(0, min(x1, img_width-1))
@@ -386,18 +452,36 @@ def create_visualization_image(predictions, geofence, output_path, area_acres, p
         
         # Draw predictions with PIL
         for i, pred in enumerate(predictions):
-            # Map coordinates similar to above
+            # Use pixel coordinates from bounding box data (PIL section)
             if 'bbox_pixels' in pred:
                 x1 = int(pred['bbox_pixels']['xmin'])
                 y1 = int(pred['bbox_pixels']['ymin'])
                 x2 = int(pred['bbox_pixels']['xmax']) 
                 y2 = int(pred['bbox_pixels']['ymax'])
+                print(f"   PIL drawing box {i+1}: ({x1},{y1}) to ({x2},{y2})") if i < 3 else None
+            elif 'bbox' in pred:
+                # Try alternative bbox format
+                bbox = pred['bbox']
+                x1 = int(bbox.get('xmin', bbox.get('x1', 0)))
+                y1 = int(bbox.get('ymin', bbox.get('y1', 0)))
+                x2 = int(bbox.get('xmax', bbox.get('x2', 50)))
+                y2 = int(bbox.get('ymax', bbox.get('y2', 50)))
+                print(f"   PIL drawing bbox box {i+1}: ({x1},{y1}) to ({x2},{y2})") if i < 3 else None
+            elif 'pixel_x' in pred and 'pixel_y' in pred:
+                # Use center pixel coordinates with default size
+                center_x = int(pred['pixel_x'])
+                center_y = int(pred['pixel_y'])
+                bbox_size = 20  # Default box size for center points
+                x1, y1 = center_x - bbox_size, center_y - bbox_size
+                x2, y2 = center_x + bbox_size, center_y + bbox_size
+                print(f"   PIL drawing center box {i+1}: ({x1},{y1}) to ({x2},{y2})") if i < 3 else None
             else:
                 center_x = int((pred.get('longitude', 0) + 180) / 360 * img_width)
                 center_y = int((90 - pred.get('latitude', 0)) / 180 * img_height)
                 bbox_size = 15
                 x1, y1 = center_x - bbox_size, center_y - bbox_size
                 x2, y2 = center_x + bbox_size, center_y + bbox_size
+                print(f"   PIL drawing fallback box {i+1}: ({x1},{y1}) to ({x2},{y2})") if i < 3 else None
             
             confidence = pred.get('confidence', 0.5)
             
@@ -566,13 +650,23 @@ def get_available_models():
     models = []
     for key, filename in AVAILABLE_MODELS.items():
         model_path = find_model_path(filename)
+        # Get display name from config if available
+        config_models = config.get('models', {})
+        model_info = config_models.get(key, {})
+        display_name = model_info.get('display_name', key.replace('_', ' ').title())
+        description = model_info.get('description', '')
+        
+        # Check if this is the default model from config
+        default_model = config.get('processing', {}).get('default_model', 'model_145')
+        
         models.append({
             'id': key,
-            'name': key.replace('_', ' ').title(),
+            'name': display_name,
             'filename': filename,
             'path': model_path,
             'exists': model_path is not None,
-            'default': key == 'model_65'
+            'default': key == default_model,
+            'description': description
         })
     return jsonify(models)
 
@@ -1068,15 +1162,22 @@ def calculate_area_and_cost(geofence_coords):
 
 def estimate_processing_time(acres):
     """Estimate processing time based on area"""
-    # Rough estimates: ~2-3 minutes per acre
-    base_time = acres * 0.1 + 1
+    # Formula: 0.1 * acres + 2 minutes
+    base_time = acres * 0.1 + 2
     return max(1, round(base_time))
 
 def process_job_async(job_id):
-    """Background processing function"""
+    """Background processing function with enhanced error handling and resource cleanup"""
+    if job_id not in active_jobs:
+        app.logger.error(f"Job {job_id} not found in active_jobs")
+        return
+        
     job = active_jobs[job_id]
+    start_time = time.time()
     
     try:
+        app.logger.info(f"Starting job {job_id} - Area: {job.get('area_acres', 'unknown')} acres")
+        
         # Step 1: Extract Nearmap imagery
         update_job_progress(job_id, 'processing', 10, 'Extracting Nearmap imagery...')
         extract_nearmap_step(job)
@@ -1094,29 +1195,73 @@ def process_job_async(job_id):
         generate_outputs_step(job)
         
         # Complete
-        update_job_progress(job_id, 'completed', 100, 'Tree detection complete!')
+        processing_time = time.time() - start_time
+        tree_count = job.get('results', {}).get('tree_count', 0)
+        completion_msg = f'Tree detection complete! Found {tree_count} trees in {processing_time:.1f}s'
+        update_job_progress(job_id, 'completed', 100, completion_msg)
+        
+        app.logger.info(f"Job {job_id} completed successfully in {processing_time:.2f}s")
+        
+    except KeyboardInterrupt:
+        app.logger.warning(f"Job {job_id} interrupted by user")
+        update_job_progress(job_id, 'cancelled', 0, 'Processing cancelled by user')
         
     except Exception as e:
+        processing_time = time.time() - start_time
         error_msg = f"Processing error: {str(e)}"
-        print(f"Job {job_id} error: {error_msg}")
-        print(traceback.format_exc())
+        
+        # Log detailed error information
+        app.logger.error(f"Job {job_id} failed after {processing_time:.2f}s: {error_msg}")
+        app.logger.error(traceback.format_exc())
+        
+        # Update job status
         update_job_progress(job_id, 'error', 0, error_msg)
+        
+        # Clean up temporary files on error
+        try:
+            temp_dir = job.get('temp_dir')
+            if temp_dir and os.path.exists(temp_dir):
+                # Don't delete immediately - keep for debugging, schedule cleanup
+                app.logger.info(f"Temporary files preserved for debugging: {temp_dir}")
+        except Exception as cleanup_error:
+            app.logger.error(f"Error during cleanup: {cleanup_error}")
+    
+    finally:
+        # Ensure job status is properly updated
+        if job_id in active_jobs and active_jobs[job_id].get('status') not in ['completed', 'error', 'cancelled']:
+            update_job_progress(job_id, 'error', 0, 'Job terminated unexpectedly')
 
 def update_job_progress(job_id, status, progress, message):
-    """Update job progress and notify clients"""
-    if job_id in active_jobs:
-        active_jobs[job_id]['status'] = status
-        active_jobs[job_id]['progress'] = progress
-        active_jobs[job_id]['message'] = message
-        
-        # Emit progress update via WebSocket if available
-        if HAS_SOCKETIO and socketio:
-            socketio.emit('job_progress', {
-                'job_id': job_id,
-                'status': status,
-                'progress': progress,
-                'message': message
-            })
+    """Update job progress and notify clients with enhanced error handling"""
+    try:
+        if job_id in active_jobs:
+            active_jobs[job_id]['status'] = status
+            active_jobs[job_id]['progress'] = progress
+            active_jobs[job_id]['message'] = message
+            active_jobs[job_id]['last_update'] = datetime.now().isoformat()
+            
+            # Log progress updates for important milestones
+            if status in ['completed', 'error', 'cancelled'] or progress % 25 == 0:
+                app.logger.info(f"Job {job_id}: {status} ({progress}%) - {message}")
+            
+            # Emit progress update via WebSocket if available
+            if HAS_SOCKETIO and socketio:
+                try:
+                    socketio.emit('job_progress', {
+                        'job_id': job_id,
+                        'status': status,
+                        'progress': progress,
+                        'message': message,
+                        'timestamp': active_jobs[job_id]['last_update']
+                    })
+                except Exception as socket_error:
+                    app.logger.warning(f"Failed to emit socket progress for job {job_id}: {socket_error}")
+        else:
+            app.logger.warning(f"Attempted to update non-existent job: {job_id}")
+            
+    except Exception as e:
+        app.logger.error(f"Error updating job progress for {job_id}: {e}")
+        # Don't re-raise - progress updates shouldn't break processing
 
 def split_large_geofence(geofence_coords, max_area_sq_km):
     """Split large geofence into smaller tiles that fit within Nearmap limits"""
@@ -1944,8 +2089,9 @@ def run_model_step(job):
                         }
                     })
                 
-                # Store results in job
+                # Store results in job - use both 'predictions' and 'final_predictions' for compatibility
                 job['results']['predictions'] = flask_predictions
+                job['results']['final_predictions'] = flask_predictions  # Also store as final_predictions for frontend
                 job['results']['raw_prediction_count'] = results['results'].initial_predictions
                 job['results']['filtered_prediction_count'] = len(flask_predictions)
                 job['results']['model_used'] = f"{job['model']} (PRODUCTION_PIPELINE)"
@@ -2015,7 +2161,9 @@ def run_model_step(job):
                 print(f"Could not get image dimensions, using defaults: {e}")
         
         # Generate sample predictions
-        job['results']['predictions'] = generate_sample_predictions(estimated_trees, job['geofence'], image_width, image_height)
+        predictions = generate_sample_predictions(estimated_trees, job['geofence'], image_width, image_height)
+        job['results']['predictions'] = predictions
+        job['results']['final_predictions'] = predictions  # Also store as final_predictions for frontend
         job['results']['raw_prediction_count'] = len(job['results']['predictions'])
         model_status = "REAL_IMAGERY_SIMULATION" if real_imagery_available else "SIMULATION"
         job['results']['model_used'] = f"{job['model']} ({model_status})"
@@ -2377,6 +2525,8 @@ def generate_outputs_step(job):
         predictions = apply_postprocessing(predictions, job['settings'])
         print(f"Overlap filter: → {len(predictions)} final predictions")
     
+    # Update both locations for compatibility
+    job['results']['predictions'] = predictions
     job['results']['final_predictions'] = predictions
     job['results']['tree_count'] = len(predictions)
     job['results']['avg_confidence'] = safe_mean([p['confidence'] for p in predictions]) if predictions else 0
@@ -2385,7 +2535,7 @@ def generate_outputs_step(job):
     job_temp_dir = os.path.join('temp_files', job['id'])
     
     # Generate CSV file
-    csv_path = os.path.join(job_temp_dir, 'tree_predictions.csv')
+    csv_path = os.path.join(job_temp_dir, 'predictions.csv')
     generate_csv_file(job, csv_path)
     
     # Generate KML file
@@ -2397,8 +2547,22 @@ def generate_outputs_step(job):
     generate_summary_file(job, summary_path)
     
     # Generate visualization image with tree predictions and bounding boxes
-    viz_path = os.path.join(job_temp_dir, 'tree_detection_visualization.jpg')
+    viz_path = os.path.join(job_temp_dir, 'detection_visualization.jpg')
     processed_img_path = job['files'].get('processed_image')  # Use processed image as background if available
+    print(f"Creating visualization with {len(predictions)} predictions")
+    print(f"First prediction: {predictions[0] if predictions else 'No predictions'}")
+    
+    # Debug: Check if predictions have bbox_pixels
+    if predictions:
+        first_pred = predictions[0]
+        print(f"First prediction keys: {list(first_pred.keys())}")
+        if 'bbox_pixels' in first_pred:
+            print(f"First prediction bbox_pixels: {first_pred['bbox_pixels']}")
+        else:
+            print("WARNING: No bbox_pixels found in predictions!")
+            if 'bbox' in first_pred:
+                print(f"First prediction has 'bbox': {first_pred['bbox']}")
+    
     create_visualization_image(predictions, job['geofence'], viz_path, job['area_info']['acres'], processed_img_path)
     
     # Update file paths - collect all files generated during the process
@@ -2560,13 +2724,17 @@ def generate_kml_file(job, output_path):
     """Generate KML file with geofence boundary"""
     geofence_coords = job['geofence']
     
+    # Create description with project name if available
+    project_name = job.get('project_name', '')
+    project_info = f"Project Name: {project_name}\n" if project_name else ""
+    
     # Simple KML structure
     kml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>ArborNote Geofence - {job['id']}</name>
     <description>
-      Processing Area: {job['area_info']['acres']} acres
+      {project_info}Processing Area: {job['area_info']['acres']} acres
       Cost: ${job['area_info']['cost_usd']}
       Trees Detected: {job['results'].get('tree_count', 0)}
       Processing Date: {job['created_at']}
@@ -2615,7 +2783,7 @@ def generate_kml_file(job, output_path):
     
     print(f"✓ Created KML file: {output_path}")
 
-def create_kml_from_geofence(geofence_coords, kml_path):
+def create_kml_from_geofence(geofence_coords, kml_path, project_name=None):
     """Create a KML file from geofence coordinates"""
     # Ensure we have at least 3 coordinates and close the polygon
     coords = list(geofence_coords)
@@ -2642,12 +2810,18 @@ def create_kml_from_geofence(geofence_coords, kml_path):
     
     coordinates_text = " ".join(coord_strings)
     
+    # Create description with project name if provided
+    description = "Tree detection analysis boundary"
+    if project_name:
+        description = f"Project Name: {project_name}\n{description}"
+    
     kml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
     <Document>
         <name>Geofence Boundary</name>
         <Placemark>
             <name>Processing Area</name>
+            <description>{description}</description>
             <Polygon>
                 <outerBoundaryIs>
                     <LinearRing>
@@ -2777,7 +2951,65 @@ def create_normalized_metadata(original_metadata_path, output_metadata_path, sca
         return None
     
 
+def cleanup_on_shutdown():
+    """Clean up resources on application shutdown"""
+    try:
+        app.logger.info("Shutting down ArborNote application...")
+        
+        # Cancel all active jobs
+        for job_id in list(active_jobs.keys()):
+            try:
+                update_job_progress(job_id, 'cancelled', 0, 'Server shutting down')
+            except Exception as e:
+                app.logger.error(f"Error cancelling job {job_id}: {e}")
+        
+        # Clean up old temporary files (older than 24 hours)
+        cleanup_old_temp_files()
+        
+        app.logger.info("Cleanup complete")
+        
+    except Exception as e:
+        app.logger.error(f"Error during shutdown cleanup: {e}")
+
+def cleanup_old_temp_files():
+    """Clean up temporary files older than 24 hours"""
+    try:
+        temp_dir = Path('temp_files')
+        if not temp_dir.exists():
+            return
+            
+        cutoff_time = time.time() - (24 * 60 * 60)  # 24 hours ago
+        cleaned_count = 0
+        
+        for item in temp_dir.iterdir():
+            try:
+                if item.stat().st_mtime < cutoff_time:
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+                    cleaned_count += 1
+            except Exception as e:
+                app.logger.warning(f"Could not clean up {item}: {e}")
+        
+        if cleaned_count > 0:
+            app.logger.info(f"Cleaned up {cleaned_count} old temporary files/directories")
+            
+    except Exception as e:
+        app.logger.error(f"Error cleaning temporary files: {e}")
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    app.logger.info(f"Received signal {signum}, shutting down gracefully...")
+    cleanup_on_shutdown()
+    sys.exit(0)
+
 if __name__ == '__main__':
+    # Set up signal handlers for graceful shutdown
+    import signal
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     # Create necessary directories
     os.makedirs('temp_files', exist_ok=True)
     os.makedirs('logs', exist_ok=True)

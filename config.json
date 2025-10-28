@@ -8,7 +8,7 @@
   "processing": {
     "cost_per_acre": 500,
     "target_resolution_mpp": 0.075,
-    "default_model": "model_65",
+    "default_model": "model_100",
     "max_area_acres": 1000,
     "imagery_months": [7, 8, 9],
     "imagery_years_back": 3,
@@ -48,8 +48,18 @@
     },
     "model_65": {
       "filename": "model_epoch_65.ckpt",
-      "display_name": "Model 65 (Default)",
-      "description": "New default model - optimized performance"
+      "display_name": "Model 65",
+      "description": "Optimized performance model"
+    },
+    "model_100": {
+      "filename": "model_epoch_100.ckpt",
+      "display_name": "Model 100 (Default)",
+      "description": "High epoch model - advanced training"
+    },
+    "model_145": {
+      "filename": "model_epoch_145.ckpt",
+      "display_name": "Model 145",
+      "description": "High epoch model - advanced training"
     },
     "model_180": {
       "filename": "model_epoch_180.ckpt",

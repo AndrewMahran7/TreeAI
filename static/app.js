@@ -1,13 +1,64 @@
 /**
  * ArborNote Tree Detection Interface - Main JavaScript
- * MVP implementation for interactive tree detection mapping
+ * Production-ready implementation for interactive tree detection mapping
  */
+
+// Production configuration
+const PRODUCTION_CONFIG = {
+    DEBUG_LOGGING: window.location.hostname === 'localhost' || window.location.search.includes('debug=true'),
+    PERFORMANCE_MONITORING: true,
+    ERROR_REPORTING: true,
+    VERSION: '3.0.0'
+};
+
+// Enhanced logging function for production
+function debugLog(message, data = null) {
+    if (PRODUCTION_CONFIG.DEBUG_LOGGING) {
+        if (data) {
+            console.log(`[ArborNote Debug] ${message}`, data);
+        } else {
+            console.log(`[ArborNote Debug] ${message}`);
+        }
+    }
+}
+
+function errorLog(message, error = null) {
+    console.error(`[ArborNote Error] ${message}`, error);
+    // In production, you might want to send this to an error tracking service
+    if (PRODUCTION_CONFIG.ERROR_REPORTING && typeof window.errorTracker !== 'undefined') {
+        window.errorTracker.captureException(error || new Error(message));
+    }
+}
 
 // Global application state
 let map, drawnItems, currentGeofence, currentJob, socket;
 let treePins = [];
 let isDrawing = false;
 let isEditing = false;
+
+// ID mapping for new ArborNote-style interface
+const ID_MAP = {
+    'draw-polygon': 'clearMapBtn', // Repurpose as draw button
+    'edit-polygon': 'clearMapBtn', 
+    'add-tree': 'clearMapBtn',
+    'remove-tree': 'clearMapBtn',
+    'clear-map': 'clearMapBtn',
+    'start-processing': 'startProcessingBtn',
+    'kml-file-input': 'kmlUpload',
+    'confidence-threshold': 'confidenceSlider',
+    'iou-threshold': 'confidenceSlider',
+    'download-all': 'downloadAll',
+    'model-select': 'modelSelect',
+    'imagery-date': 'dateSelect',
+    'address-search': 'addressInput',
+    'search-button': 'geocodeBtn',
+    'search-results': 'statusMessage'
+};
+
+// Compatibility function to get elements by old or new ID
+function getElement(oldId) {
+    return document.getElementById(oldId) || document.getElementById(ID_MAP[oldId]);
+}
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', function() {
@@ -50,10 +101,11 @@ function initializeMap() {
                     message: '<strong>Error:</strong> Shape edges cannot cross!'
                 },
                 shapeOptions: {
-                    color: '#2e8b57',
+                    color: '#3CB44B',
                     weight: 3,
                     opacity: 0.8,
-                    fillOpacity: 0.2
+                    fillOpacity: 0.2,
+                    fillColor: '#3CB44B'
                 }
             },
             polyline: false,
@@ -68,14 +120,14 @@ function initializeMap() {
         }
     });
 
-    // Add draw control to map but hide it (we'll use custom buttons)
+    // Add draw control to map
     map.addControl(drawControl);
-    document.querySelector('.leaflet-draw').style.display = 'none';
 
     // Map event listeners
     map.on('draw:created', onGeofenceCreated);
     map.on('draw:edited', onGeofenceEdited);
     map.on('draw:deleted', onGeofenceDeleted);
+    map.on('draw:drawstart', onDrawStart);
     map.on('click', onMapClick);
 }
 
@@ -84,38 +136,82 @@ function initializeMap() {
 // ============================================================================
 
 function initializeUI() {
-    // Map control buttons
-    document.getElementById('draw-polygon').addEventListener('click', startDrawing);
-    document.getElementById('edit-polygon').addEventListener('click', startEditing);
-    document.getElementById('add-tree').addEventListener('click', startAddingTrees);
-    document.getElementById('remove-tree').addEventListener('click', startRemovingTrees);
-    document.getElementById('clear-map').addEventListener('click', clearMap);
+    // Initialize new ArborNote-style controls
+    const clearMapBtn = document.getElementById('clearMapBtn');
+    const startProcessingBtn = document.getElementById('startProcessingBtn');
+    const geocodeBtn = document.getElementById('geocodeBtn');
+    const addressInput = document.getElementById('addressInput');
+    
+    // Clear map functionality (combines old drawing tools)
+    if (clearMapBtn) {
+        clearMapBtn.addEventListener('click', clearGeofence);
+    }
 
     // Processing button
-    document.getElementById('start-processing').addEventListener('click', startProcessing);
+    if (startProcessingBtn) {
+        startProcessingBtn.addEventListener('click', startProcessing);
+    }
     
-    // KML Upload functionality
-    const kmlUploadLabel = document.querySelector('label[for="kml-file-input"]');
-    if (kmlUploadLabel) {
-        kmlUploadLabel.addEventListener('click', function() {
-            console.log('KML upload label clicked');
+    // Address search
+    if (geocodeBtn && addressInput) {
+        geocodeBtn.addEventListener('click', function() {
+            const address = addressInput.value.trim();
+            if (address) {
+                searchAddress(address);
+            }
+        });
+        
+        addressInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                geocodeBtn.click();
+            }
         });
     }
     
-    const kmlFileInput = document.getElementById('kml-file-input');
-    if (kmlFileInput) {
-        kmlFileInput.addEventListener('change', handleKMLUpload);
-        console.log('KML file input event listener attached');
-    } else {
-        console.error('KML file input element not found');
+    // KML Upload functionality
+    const kmlUpload = document.getElementById('kmlUpload');
+    if (kmlUpload) {
+        kmlUpload.addEventListener('change', handleKMLUpload);
+        debugLog('KML upload event listener attached');
     }
     
-    // Settings listeners
-    document.getElementById('confidence-threshold').addEventListener('change', validateSettings);
-    document.getElementById('iou-threshold').addEventListener('change', validateSettings);
+    // Settings controls
+    const confidenceSlider = document.getElementById('confidenceSlider');
+    const confidenceValue = document.getElementById('confidenceValue');
+    if (confidenceSlider && confidenceValue) {
+        confidenceSlider.addEventListener('input', function() {
+            confidenceValue.textContent = this.value;
+        });
+        confidenceSlider.addEventListener('change', validateSettings);
+    }
     
-    // Download button
-    document.getElementById('download-all').addEventListener('click', downloadAllFiles);
+    // Download buttons with proper file type mapping
+    const downloadButtons = {
+        'downloadCsv': 'predictions_csv',
+        'downloadKml': 'geofence_kml', 
+        'downloadImage': 'visualization_image',
+        'downloadOriginal': 'raw_image',
+        'downloadProcessed': 'processed_image',
+        'downloadMetadata': 'metadata',
+        'downloadAll': 'all'
+    };
+    
+    Object.entries(downloadButtons).forEach(([buttonId, fileType]) => {
+        const button = document.getElementById(buttonId);
+        if (button) {
+            button.addEventListener('click', function() {
+                debugLog(`Download button clicked: ${buttonId} -> ${fileType}`);
+                if (buttonId === 'downloadAll') {
+                    downloadAllFiles();
+                } else {
+                    downloadFile(fileType);
+                }
+            });
+            console.log(`Download button initialized: ${buttonId} -> ${fileType}`);
+        } else {
+            console.warn(`Download button not found: ${buttonId}`);
+        }
+    });
     
     // Address search functionality
     initializeAddressSearch();
@@ -160,7 +256,7 @@ async function loadAvailableData() {
 }
 
 function populateModelSelect(models) {
-    const select = document.getElementById('model-select');
+    const select = document.getElementById('modelSelect');
     select.innerHTML = '';
     
     models.forEach(model => {
@@ -411,14 +507,41 @@ function escapeHtml(text) {
 }
 
 // ============================================================================
+// ZOOM UTILITY FUNCTIONS
+// ============================================================================
+
+function zoomToPolygon(polygon, delay = 300) {
+    // Auto-zoom and center to the polygon
+    setTimeout(() => {
+        try {
+            const bounds = polygon.getBounds();
+            if (bounds.isValid()) {
+                map.fitBounds(bounds.pad(0.2), {
+                    maxZoom: 16,
+                    animate: true,
+                    duration: 1.0
+                });
+                console.log('Map auto-zoomed to polygon');
+            } else {
+                console.error('Invalid polygon bounds for zoom');
+            }
+        } catch (zoomError) {
+            console.error('Error auto-zooming to polygon:', zoomError);
+        }
+    }, delay);
+}
+
+// ============================================================================
 // MAP DRAWING FUNCTIONS
 // ============================================================================
 
 function startDrawing() {
-    if (currentGeofence) {
-        if (!confirm('This will replace your current geofence. Continue?')) {
+    // Always check if there are existing polygons and confirm clearing
+    if (currentGeofence || drawnItems.getLayers().length > 0) {
+        if (!confirm('This will delete the current polygon and start fresh. Continue?')) {
             return;
         }
+        // Clear all existing polygons
         clearGeofence();
     }
     
@@ -444,18 +567,72 @@ function startEditing() {
     showAlert('Click and drag the geofence points to modify the area', 'info');
 }
 
+function onDrawStart(e) {
+    // If there's already a polygon drawn, show warning
+    if (currentGeofence || drawnItems.getLayers().length > 0) {
+        // Cancel the current drawing
+        map._toolbars.draw._modes.polygon.handler.disable();
+        
+        // Show confirmation dialog matching the requested message
+        if (confirm('This will delete the current polygon and start fresh. Continue?')) {
+            // User confirmed, clear existing polygon and start fresh
+            clearGeofence();
+            clearTreePins();
+            hideResults();
+            
+            // Hide progress and results sections
+            const progressSection = document.getElementById('progressSection');
+            const resultsSection = document.getElementById('resultsSection');
+            if (progressSection) progressSection.classList.add('hidden');
+            if (resultsSection) resultsSection.classList.add('hidden');
+            
+            // Update status message
+            const statusMessage = document.getElementById('statusMessage');
+            if (statusMessage) {
+                statusMessage.innerHTML = '<i class="fas fa-info-circle"></i> Previous boundary deleted. Draw your new polygon.';
+                statusMessage.className = 'status-message status-info';
+            }
+            
+            // Re-enable drawing after a short delay
+            setTimeout(() => {
+                if (map._toolbars && map._toolbars.draw && map._toolbars.draw._modes.polygon) {
+                    map._toolbars.draw._modes.polygon.handler.enable();
+                }
+            }, 100);
+        } else {
+            // User cancelled, don't start drawing
+            console.log('User cancelled drawing new polygon');
+        }
+    }
+}
+
 function onGeofenceCreated(e) {
     const layer = e.layer;
     drawnItems.addLayer(layer);
     currentGeofence = layer;
     
     isDrawing = false;
-    document.getElementById('draw-polygon').classList.remove('active');
-    document.getElementById('edit-polygon').disabled = false;
-    document.getElementById('start-processing').disabled = false;
     
+    // Enable the start processing button
+    const startBtn = document.getElementById('startProcessingBtn');
+    if (startBtn) {
+        startBtn.disabled = false;
+    }
+    
+    // Auto-zoom and center to the newly drawn polygon
+    zoomToPolygon(layer);
+    
+    // Calculate and display area information
     calculateAndDisplayArea();
-    showAlert('Geofence created! You can now start processing or edit the area.', 'success');
+    
+    // Show success message
+    const statusMessage = document.getElementById('statusMessage');
+    if (statusMessage) {
+        statusMessage.innerHTML = '<i class="fas fa-check-circle"></i> Polygon created! Ready to start tree detection.';
+        statusMessage.className = 'status-message status-success';
+    }
+    
+    console.log('Geofence created successfully');
 }
 
 function onGeofenceEdited(e) {
@@ -468,11 +645,24 @@ function onGeofenceEdited(e) {
 
 function onGeofenceDeleted(e) {
     currentGeofence = null;
-    document.getElementById('edit-polygon').disabled = true;
-    document.getElementById('start-processing').disabled = true;
     
+    // Disable the start processing button
+    const startBtn = document.getElementById('startProcessingBtn');
+    if (startBtn) {
+        startBtn.disabled = true;
+    }
+    
+    // Hide area information
     hideAreaInfo();
-    showAlert('Geofence deleted', 'info');
+    
+    // Update status message
+    const statusMessage = document.getElementById('statusMessage');
+    if (statusMessage) {
+        statusMessage.innerHTML = '<i class="fas fa-info-circle"></i> Draw a polygon to start analysis.';
+        statusMessage.className = 'status-message status-info';
+    }
+    
+    console.log('Geofence deleted');
 }
 
 async function calculateAndDisplayArea() {
@@ -499,26 +689,58 @@ async function calculateAndDisplayArea() {
 }
 
 function displayAreaInfo(areaInfo) {
-    document.getElementById('area-acres').textContent = `${areaInfo.acres} acres`;
-    document.getElementById('area-meters').textContent = `${areaInfo.square_meters.toLocaleString()} m²`;
-    document.getElementById('total-cost').textContent = areaInfo.cost_usd.toLocaleString();
+    // Update new ArborNote-style area info display
+    const areaAcres = document.getElementById('areaAcres');
+    const estimatedCost = document.getElementById('estimatedCost');
+    const estimatedTime = document.getElementById('estimatedTime');
+    const areaInfoCard = document.getElementById('areaInfo');
+    const startBtn = document.getElementById('startProcessingBtn');
     
-    // Calculate and display estimated time
-    const estimatedMinutes = Math.max(1, Math.round(areaInfo.acres * 2.5));
-    document.getElementById('estimated-time').textContent = `${estimatedMinutes} minutes`;
+    if (areaAcres) {
+        areaAcres.textContent = `${areaInfo.acres} acres`;
+    }
     
-    // Update header display
-    document.getElementById('cost-display').textContent = `Estimated Cost: $${areaInfo.cost_usd.toLocaleString()}`;
-    document.getElementById('area-display').textContent = `Area: ${areaInfo.acres} acres`;
+    if (estimatedCost) {
+        estimatedCost.textContent = `$${areaInfo.cost_usd.toLocaleString()}`;
+    }
     
-    // Show area info section
-    document.getElementById('area-info').classList.remove('hidden');
+    if (estimatedTime) {
+        // Calculate estimated time using the correct formula: 0.1 * acres + 2
+        const estimatedMinutes = Math.max(1, Math.round(areaInfo.acres * 0.1 + 2));
+        estimatedTime.textContent = `${estimatedMinutes} min`;
+    }
+    
+    // Show area info card and enable processing button
+    if (areaInfoCard) {
+        areaInfoCard.classList.remove('hidden');
+    }
+    
+    if (startBtn) {
+        startBtn.disabled = false;
+    }
+    
+    console.log('Area info updated:', areaInfo);
 }
 
 function hideAreaInfo() {
-    document.getElementById('area-info').classList.add('hidden');
-    document.getElementById('cost-display').textContent = 'Estimated Cost: $0';
-    document.getElementById('area-display').textContent = 'Area: 0 acres';
+    const areaInfoCard = document.getElementById('areaInfo');
+    const startBtn = document.getElementById('startProcessingBtn');
+    const areaAcres = document.getElementById('areaAcres');
+    const estimatedCost = document.getElementById('estimatedCost');
+    const estimatedTime = document.getElementById('estimatedTime');
+    
+    if (areaInfoCard) {
+        areaInfoCard.classList.add('hidden');
+    }
+    
+    if (startBtn) {
+        startBtn.disabled = true;
+    }
+    
+    // Reset values
+    if (areaAcres) areaAcres.textContent = '-- acres';
+    if (estimatedCost) estimatedCost.textContent = '$--';
+    if (estimatedTime) estimatedTime.textContent = '-- min';
 }
 
 function getGeofenceCoordinates() {
@@ -566,11 +788,13 @@ function onMapClick(e) {
 }
 
 function addTreePin(latlng, confidence = null) {
+    const confidenceBadge = confidence ? `<div class="confidence-badge">${Math.round(confidence * 100)}%</div>` : '';
+    
     const treeIcon = L.divIcon({
-        className: 'tree-pin',
-        html: confidence ? `<div class="confidence-badge">${Math.round(confidence * 100)}%</div>` : '',
-        iconSize: [12, 12],
-        iconAnchor: [6, 6]
+        className: 'tree-pin-emoji',
+        html: `<div style="font-size: 20px; text-align: center; line-height: 1;">🌲${confidenceBadge}</div>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
     });
     
     const marker = L.marker(latlng, { icon: treeIcon }).addTo(map);
@@ -635,13 +859,11 @@ function displayTreePredictions(predictions) {
         else if (confidence < 75) iconColor = 'orange';
         
         const treeIcon = L.divIcon({
-            className: 'tree-pin',
-            html: `<div class="tree-marker" style="background-color: ${iconColor};">
-                     <i class="fas fa-tree"></i>
-                   </div>`,
-            iconSize: [20, 20],
-            iconAnchor: [10, 10],
-            popupAnchor: [0, -10]
+            className: 'tree-pin-emoji',
+            html: `<div style="font-size: 24px; text-align: center; line-height: 1; filter: ${confidence >= 75 ? 'hue-rotate(0deg)' : confidence >= 50 ? 'hue-rotate(30deg)' : 'hue-rotate(60deg)'};">🌲</div>`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12],
+            popupAnchor: [0, -12]
         });
         
         const marker = L.marker([prediction.latitude, prediction.longitude], {
@@ -681,19 +903,33 @@ async function startProcessing() {
         return;
     }
     
+    console.log('Starting tree detection processing...');
+    
     const coords = getGeofenceCoordinates();
     const settings = gatherSettings();
     
     const processingData = {
         geofence: coords,
         settings: settings,
-        imagery_date: document.getElementById('imagery-date').value,
-        model: document.getElementById('model-select').value
+        imagery_date: document.getElementById('dateSelect').value || '',
+        model: document.getElementById('modelSelect').value || 'model_100'
     };
     
+    console.log('Processing data:', processingData);
+    
     try {
-        document.getElementById('start-processing').disabled = true;
-        showProgress(true);
+        // Disable the correct button ID
+        const startBtn = document.getElementById('startProcessingBtn');
+        if (startBtn) {
+            startBtn.disabled = true;
+            startBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting...';
+        }
+        
+        // Show progress section
+        const progressSection = document.getElementById('progressSection');
+        if (progressSection) {
+            progressSection.classList.remove('hidden');
+        }
         
         const response = await fetch('/api/process', {
             method: 'POST',
@@ -719,17 +955,37 @@ async function startProcessing() {
     } catch (error) {
         console.error('Error starting processing:', error);
         showAlert(`Error: ${error.message}`, 'error');
-        document.getElementById('start-processing').disabled = false;
-        showProgress(false);
+        
+        // Re-enable the correct button ID
+        const startBtn = document.getElementById('startProcessingBtn');
+        if (startBtn) {
+            startBtn.disabled = false;
+            startBtn.innerHTML = '<i class="fas fa-play"></i> Start Tree Detection';
+        }
+        
+        // Hide progress section on error
+        const progressSection = document.getElementById('progressSection');
+        if (progressSection) {
+            progressSection.classList.add('hidden');
+        }
     }
 }
 
 function gatherSettings() {
+    // Get confidence threshold from the existing slider
+    const confidenceSlider = document.getElementById('confidenceSlider');
+    const confidenceThreshold = confidenceSlider ? parseFloat(confidenceSlider.value) : 0.25;
+    
+    // Get project name from input field
+    const projectNameInput = document.getElementById('projectName');
+    const projectName = projectNameInput ? projectNameInput.value.trim() : '';
+    
     return {
-        confidence_threshold: parseFloat(document.getElementById('confidence-threshold').value),
-        iou_threshold: parseFloat(document.getElementById('iou-threshold').value),
-        patch_size: parseInt(document.getElementById('patch-size').value),
-        enable_postprocessing: document.getElementById('enable-postprocessing').checked
+        confidence_threshold: confidenceThreshold,
+        iou_threshold: 0.5, // Default value since this control doesn't exist yet
+        patch_size: 512,    // Default value since this control doesn't exist yet
+        enable_postprocessing: true, // Default value since this control doesn't exist yet
+        project_name: projectName || null
     };
 }
 
@@ -752,35 +1008,79 @@ async function pollJobStatus() {
 }
 
 function updateProgress(data) {
-    const progressFill = document.getElementById('progress-fill');
-    const progressText = document.getElementById('progress-text');
+    const progressFill = document.getElementById('progressFill');
+    const progressText = document.getElementById('progressText');
+    const statusMessage = document.getElementById('statusMessage');
+    const progressSection = document.getElementById('progressSection');
+    const startBtn = document.getElementById('startProcessingBtn');
     
-    progressFill.style.width = `${data.progress}%`;
-    progressText.textContent = data.message || 'Processing...';
+    // Show progress section
+    if (progressSection) {
+        progressSection.classList.remove('hidden');
+    }
+    
+    // Update progress bar
+    if (progressFill) {
+        progressFill.style.width = `${data.progress}%`;
+    }
+    
+    if (progressText) {
+        progressText.textContent = data.message || 'Processing...';
+    }
+    
+    // Update status message
+    if (statusMessage) {
+        statusMessage.innerHTML = `<i class="fas fa-info-circle"></i> ${data.message || 'Processing...'}`;
+        statusMessage.className = 'status-message status-info';
+    }
     
     if (data.status === 'completed') {
-        showAlert('Tree detection completed successfully!', 'success');
+        if (statusMessage) {
+            statusMessage.innerHTML = `<i class="fas fa-check-circle"></i> Tree detection completed successfully!`;
+            statusMessage.className = 'status-message status-success';
+        }
         displayResults(data);
-        document.getElementById('start-processing').disabled = false;
+        if (startBtn) startBtn.disabled = false;
         
     } else if (data.status === 'error') {
-        showAlert(`Processing failed: ${data.message}`, 'error');
+        if (statusMessage) {
+            statusMessage.innerHTML = `<i class="fas fa-exclamation-circle"></i> Processing failed: ${data.message}`;
+            statusMessage.className = 'status-message status-error';
+        }
         showProgress(false);
-        document.getElementById('start-processing').disabled = false;
+        if (startBtn) startBtn.disabled = false;
     }
 }
 
 function displayResults(jobData) {
     // Show results section
-    document.getElementById('results-section').classList.remove('hidden');
+    const resultsSection = document.getElementById('resultsSection');
+    if (resultsSection) {
+        resultsSection.classList.remove('hidden');
+    }
+    
+    // Ensure currentJob is set for downloads
+    if (jobData.job_id && !currentJob) {
+        currentJob = jobData.job_id;
+        console.log(`Set currentJob for downloads: ${currentJob}`);
+    }
     
     console.log('Displaying results:', jobData);
+    console.log(`Current job for downloads: ${currentJob}`);
     
     // Update result statistics
     if (jobData.results) {
-        document.getElementById('tree-count').textContent = jobData.results.tree_count || 0;
-        document.getElementById('avg-confidence').textContent = 
-            jobData.results.avg_confidence ? `${Math.round(jobData.results.avg_confidence * 100)}%` : '0%';
+        const treeCount = document.getElementById('treeCount');
+        const avgConfidence = document.getElementById('avgConfidence');
+        
+        if (treeCount) {
+            treeCount.textContent = jobData.results.tree_count || 0;
+        }
+        
+        if (avgConfidence) {
+            avgConfidence.textContent = jobData.results.avg_confidence ? 
+                `${Math.round(jobData.results.avg_confidence * 100)}%` : '0%';
+        }
         
         // Display tree predictions on the map
         if (jobData.results.final_predictions && jobData.results.final_predictions.length > 0) {
@@ -851,42 +1151,88 @@ function updateFileList(files) {
 }
 
 async function downloadFile(fileType) {
-    if (!currentJob) return;
+    if (!currentJob) {
+        showAlert('No completed analysis to download', 'warning');
+        console.warn('Download attempted but no currentJob set');
+        return;
+    }
+    
+    console.log(`Downloading file: ${fileType} for job: ${currentJob}`);
     
     try {
-        const response = await fetch(`/api/download/${currentJob}/${fileType}`);
+        const downloadUrl = `/api/download/${currentJob}/${fileType}`;
+        console.log(`Download URL: ${downloadUrl}`);
+        
+        const response = await fetch(downloadUrl);
+        console.log(`Download response status: ${response.status}`);
+        
         if (response.ok) {
             const blob = await response.blob();
+            const contentDisposition = response.headers.get('content-disposition');
+            let filename = `${fileType}_${currentJob}`;
+            
+            // Try to get filename from response headers
+            if (contentDisposition) {
+                const matches = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+                if (matches != null && matches[1]) {
+                    filename = matches[1].replace(/['"]/g, '');
+                }
+            }
+            
+            // Create download link
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `${fileType}_${currentJob}`;
+            a.download = filename;
             document.body.appendChild(a);
             a.click();
             window.URL.revokeObjectURL(url);
             document.body.removeChild(a);
+            
+            showAlert(`Downloaded ${fileType} successfully!`, 'success');
+            console.log(`Successfully downloaded: ${filename}`);
+        } else {
+            const errorText = await response.text();
+            throw new Error(`Download failed: ${response.status} - ${errorText}`);
         }
     } catch (error) {
         console.error('Error downloading file:', error);
-        showAlert('Error downloading file', 'error');
+        showAlert(`Error downloading ${fileType}: ${error.message}`, 'error');
     }
 }
 
 async function downloadAllFiles() {
-    if (!currentJob) return;
+    if (!currentJob) {
+        showAlert('No completed analysis to download', 'warning');
+        console.warn('Download all attempted but no currentJob set');
+        return;
+    }
+    
+    console.log(`Downloading all files for job: ${currentJob}`);
     
     try {
-        const response = await fetch(`/api/download-all/${currentJob}`);
+        const downloadUrl = `/api/download-all/${currentJob}`;
+        console.log(`Download all URL: ${downloadUrl}`);
+        
+        const response = await fetch(downloadUrl);
+        console.log(`Download all response status: ${response.status}`);
+        
         if (response.ok) {
             const blob = await response.blob();
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `tree_detection_${currentJob}.zip`;
+            a.download = `tree_detection_results_${currentJob}.zip`;
             document.body.appendChild(a);
             a.click();
             window.URL.revokeObjectURL(url);
             document.body.removeChild(a);
+            
+            showAlert('Downloaded all files successfully!', 'success');
+            console.log(`Successfully downloaded all files as ZIP`);
+        } else {
+            const errorText = await response.text();
+            throw new Error(`Download failed: ${response.status} - ${errorText}`);
         }
     } catch (error) {
         console.error('Error downloading files:', error);
@@ -899,7 +1245,7 @@ async function downloadAllFiles() {
 // ============================================================================
 
 function clearMap() {
-    if (currentGeofence && !confirm('This will clear all data on the map. Continue?')) {
+    if (currentGeofence && !confirm('This will delete all boundaries drawn on the map. Continue?')) {
         return;
     }
     
@@ -907,21 +1253,44 @@ function clearMap() {
     clearTreePins();
     hideResults();
     
-    // Reset UI state
-    document.getElementById('edit-polygon').disabled = true;
-    document.getElementById('start-processing').disabled = true;
-    document.getElementById('add-tree').disabled = false;
-    document.getElementById('remove-tree').disabled = false;
+    // Reset UI state for new ArborNote interface
+    const startBtn = document.getElementById('startProcessingBtn');
+    if (startBtn) {
+        startBtn.disabled = true;
+    }
     
-    showAlert('Map cleared', 'info');
+    // Hide progress and results sections
+    const progressSection = document.getElementById('progressSection');
+    const resultsSection = document.getElementById('resultsSection');
+    if (progressSection) progressSection.classList.add('hidden');
+    if (resultsSection) resultsSection.classList.add('hidden');
+    
+    // Update status message
+    const statusMessage = document.getElementById('statusMessage');
+    if (statusMessage) {
+        statusMessage.innerHTML = '<i class="fas fa-info-circle"></i> Map cleared. Draw a new polygon to start analysis.';
+        statusMessage.className = 'status-message status-info';
+    }
+    
+    console.log('Map cleared - all boundaries deleted');
 }
 
 function clearGeofence() {
-    if (currentGeofence) {
-        drawnItems.removeLayer(currentGeofence);
-        currentGeofence = null;
-    }
+    // Remove all drawn layers (handles multiple polygons if any exist)
+    drawnItems.clearLayers();
+    currentGeofence = null;
+    
+    // Hide area information
     hideAreaInfo();
+    
+    // Disable start processing button
+    const startBtn = document.getElementById('startProcessingBtn');
+    if (startBtn) {
+        startBtn.disabled = true;
+    }
+    
+    // Reset progress and results
+    hideResults();
 }
 
 function hideResults() {
@@ -943,14 +1312,37 @@ function showProgress(show) {
 }
 
 function showAlert(message, type = 'info') {
-    const alertsContainer = document.getElementById('alerts');
+    // Get or create alerts container
+    let alertsContainer = document.getElementById('alerts');
+    if (!alertsContainer) {
+        alertsContainer = document.createElement('div');
+        alertsContainer.id = 'alerts';
+        alertsContainer.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            max-width: 400px;
+        `;
+        document.body.appendChild(alertsContainer);
+    }
     
     const alert = document.createElement('div');
     alert.className = `alert alert-${type}`;
+    alert.style.cssText = `
+        background: ${type === 'error' ? '#f8d7da' : type === 'success' ? '#d4edda' : type === 'warning' ? '#fff3cd' : '#d1ecf1'};
+        color: ${type === 'error' ? '#721c24' : type === 'success' ? '#155724' : type === 'warning' ? '#856404' : '#0c5460'};
+        border: 1px solid ${type === 'error' ? '#f5c6cb' : type === 'success' ? '#c3e6cb' : type === 'warning' ? '#ffeaa7' : '#bee5eb'};
+        padding: 12px 16px;
+        margin-bottom: 10px;
+        border-radius: 4px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        font-size: 14px;
+    `;
     alert.innerHTML = `
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <span>${message}</span>
-            <button onclick="this.parentElement.parentElement.remove()" style="background: none; border: none; font-size: 1.2em; cursor: pointer;">&times;</button>
+            <button onclick="this.parentElement.parentElement.remove()" style="background: none; border: none; font-size: 1.2em; cursor: pointer; color: inherit;">&times;</button>
         </div>
     `;
     
@@ -1014,17 +1406,12 @@ async function handleKMLUpload(event) {
         return;
     }
     
-    // Show loading status
-    const statusDiv = document.getElementById('kml-upload-status');
-    if (!statusDiv) {
-        console.error('Upload status div not found');
-        showAlert('Upload interface not properly initialized', 'error');
-        return;
+    // Show loading status using the main status message
+    const statusMessage = document.getElementById('statusMessage');
+    if (statusMessage) {
+        statusMessage.innerHTML = '<i class="fas fa-upload"></i> Uploading and processing KML file...';
+        statusMessage.className = 'status-message status-info';
     }
-    
-    statusDiv.className = 'upload-status loading';
-    statusDiv.textContent = 'Uploading and processing file...';
-    statusDiv.style.display = 'block';
     
     try {
         const formData = new FormData();
@@ -1052,11 +1439,11 @@ async function handleKMLUpload(event) {
                 console.log('Creating polygon with coordinates:', result.coordinates.length, 'points');
                 console.log('First few coordinates:', result.coordinates.slice(0, 3));
                 
-                // Ensure coordinates are in the correct format [lat, lng]
+                // Backend already sends coordinates in correct [lat, lng] format
                 let processedCoords = result.coordinates.map(coord => {
                     // Handle different coordinate formats
                     if (Array.isArray(coord) && coord.length >= 2) {
-                        // Already in array format [lat, lng] or [lng, lat, alt]
+                        // Backend already converted to [lat, lng] format - use as-is
                         return [parseFloat(coord[0]), parseFloat(coord[1])];
                     } else if (typeof coord === 'object' && coord.lat && coord.lng) {
                         // Object format {lat: x, lng: y}
@@ -1075,8 +1462,8 @@ async function handleKMLUpload(event) {
                 }
                 
                 const polygon = L.polygon(processedCoords, {
-                    color: '#2e8b57',
-                    fillColor: '#2e8b57',
+                    color: '#3CB44B',
+                    fillColor: '#3CB44B',
                     fillOpacity: 0.2,
                     weight: 3,
                     opacity: 0.8
@@ -1089,50 +1476,35 @@ async function handleKMLUpload(event) {
                 console.log('Polygon created and added to map');
                 console.log('Polygon bounds:', polygon.getBounds());
                 
-                // Update UI first
-                updateAreaInfoFromKML(result.area_info);
-                if (typeof updateUIState === 'function') {
-                    updateUIState();
+                // Treat KML import exactly like a drawn polygon
+                // Enable the start processing button (using correct ArborNote ID)
+                const startBtn = document.getElementById('startProcessingBtn');
+                if (startBtn) {
+                    startBtn.disabled = false;
                 }
                 
-                // Fit map to polygon bounds with padding for better visibility
-                setTimeout(() => {
-                    try {
-                        const bounds = polygon.getBounds();
-                        console.log('Fitting map to bounds:', bounds);
-                        
-                        // Check if bounds are valid
-                        if (bounds.isValid()) {
-                            // Add generous padding and set minimum zoom constraints
-                            map.fitBounds(bounds.pad(0.2), {
-                                maxZoom: 16,
-                                animate: true,
-                                duration: 1.0
-                            });
-                            console.log('Map zoomed to geofence successfully');
-                            console.log('Current map center:', map.getCenter());
-                            console.log('Current map zoom:', map.getZoom());
-                        } else {
-                            console.error('Invalid bounds:', bounds);
-                            throw new Error('Invalid polygon bounds - cannot zoom to area');
-                        }
-                    } catch (zoomError) {
-                        console.error('Error zooming to geofence:', zoomError);
-                        showAlert('Geofence created but could not zoom to area', 'warning');
-                    }
-                }, 300);
+                // Show the progress section (it's needed for status messages)
+                const progressSection = document.getElementById('progressSection');
+                if (progressSection) {
+                    progressSection.classList.remove('hidden');
+                }
                 
-                // Show success status
-                statusDiv.className = 'upload-status success';
-                statusDiv.textContent = `Successfully loaded geofence with ${result.coordinates.length} points - Zooming to area...`;
+                // Calculate and display area information (same as drawn polygons)
+                calculateAndDisplayArea();
                 
-                // Also show a more prominent alert
-                showAlert(`KML file loaded successfully! Created geofence polygon with ${processedCoords.length} points.`, 'success');
+                // Show success message (same as drawn polygons)
+                const statusMessage = document.getElementById('statusMessage');
+                if (statusMessage) {
+                    statusMessage.innerHTML = '<i class="fas fa-check-circle"></i> KML boundary imported! Ready to start tree detection.';
+                    statusMessage.className = 'status-message status-success';
+                }
                 
-                // Hide status after 5 seconds
-                setTimeout(() => {
-                    statusDiv.style.display = 'none';
-                }, 5000);
+                // Auto-zoom and center to the imported KML polygon
+                zoomToPolygon(polygon);
+                console.log('KML polygon treated as drawn boundary - ready for processing');
+                
+                // Show success alert
+                showAlert(`KML file loaded successfully! Boundary created with ${processedCoords.length} points.`, 'success');
                 
             } else {
                 throw new Error('No valid coordinates found in the file');
@@ -1145,16 +1517,16 @@ async function handleKMLUpload(event) {
         
     } catch (error) {
         console.error('KML upload error:', error);
-        statusDiv.className = 'upload-status error';
-        statusDiv.textContent = `Error: ${error.message}`;
+        
+        // Update status message to show error
+        const statusMessage = document.getElementById('statusMessage');
+        if (statusMessage) {
+            statusMessage.innerHTML = `<i class="fas fa-exclamation-triangle"></i> KML upload failed: ${error.message}`;
+            statusMessage.className = 'status-message status-error';
+        }
         
         // Also show a prominent alert
         showAlert(`KML upload failed: ${error.message}`, 'error');
-        
-        // Hide status after 8 seconds for errors
-        setTimeout(() => {
-            statusDiv.style.display = 'none';
-        }, 8000);
     }
     
     // Clear the file input
@@ -1197,9 +1569,9 @@ function updateAreaInfoFromKML(areaInfo) {
         totalCost.textContent = areaInfo.cost_usd.toFixed(0);
     }
     
-    // Calculate and update estimated processing time
+    // Calculate and update estimated processing time using correct formula: 0.1 * acres + 2
     if (estimatedTime && areaInfo.acres !== undefined) {
-        const estimatedMinutes = Math.max(1, Math.round(areaInfo.acres * 2.5));
+        const estimatedMinutes = Math.max(1, Math.round(areaInfo.acres * 0.1 + 2));
         estimatedTime.textContent = `${estimatedMinutes} minutes`;
     }
     
@@ -1236,5 +1608,6 @@ window.ArborNote = {
     currentGeofence,
     currentJob,
     clearMap,
+    clearGeofence,
     startProcessing
 };
